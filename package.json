@@ -47,8 +47,11 @@
     "typescript": "catalog:"
   },
   "lint-staged": {
-    "*": [
+    "*.{js,jsx,ts,tsx}": [
       "oxlint",
+      "oxfmt --write"
+    ],
+    "*.{json,md,css}": [
       "oxfmt --write"
     ]
   },
