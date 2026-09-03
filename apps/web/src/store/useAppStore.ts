@@ -4,9 +4,11 @@ import { ClickUpClient, ClickUpTask, ClickUpUser } from "../lib/clickup";
 import { notify, setTrayTitle, clearTrayTitle } from "../lib/native";
 
 export interface ActiveTimer {
+  entryId?: string;
   taskId: string;
   taskName: string;
   startTime: number;
+  accumulatedSeconds?: number;
   isRunning: boolean;
 }
 
@@ -22,6 +24,7 @@ interface AppState {
   elapsedSeconds: number;
   todayLoggedSeconds: number;
   dailyGoalHours: number;
+  isSyncing: boolean;
 
   // Pomodoro & Notifications
   isPomodoroActive: boolean;
@@ -48,9 +51,12 @@ interface AppState {
   // Timer Actions
   startTimer: (taskId: string, taskName: string) => Promise<void>;
   pauseTimer: () => Promise<void>;
-  resumeTimer: () => void;
+  resumeTimer: () => Promise<void>;
   stopTimer: () => Promise<void>;
   tick: () => void;
+  syncCurrentTimer: () => Promise<void>;
+  syncTodayTime: () => Promise<void>;
+  syncAll: () => Promise<void>;
 
   // Task Actions
   fetchTasks: () => Promise<void>;
@@ -95,6 +101,11 @@ function formatTime(seconds: number): string {
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
 }
 
+// In-flight request deduplication promises
+let syncTimerPromise: Promise<void> | null = null;
+let syncTodayPromise: Promise<void> | null = null;
+let fetchTasksPromise: Promise<void> | null = null;
+
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -105,8 +116,9 @@ export const useAppStore = create<AppState>()(
 
       activeTimer: null,
       elapsedSeconds: 0,
-      todayLoggedSeconds: 3600 * 2.5, // sample 2h 30m logged
+      todayLoggedSeconds: 0,
       dailyGoalHours: 8,
+      isSyncing: false,
 
       isPomodoroActive: false,
       pomodoroSecondsRemaining: 25 * 60,
@@ -135,10 +147,12 @@ export const useAppStore = create<AppState>()(
           updatedToday += elapsedSeconds;
         }
 
+        const now = Date.now();
         const newTimer: ActiveTimer = {
           taskId,
           taskName,
-          startTime: Date.now(),
+          startTime: now,
+          accumulatedSeconds: 0,
           isRunning: true,
         };
 
@@ -155,30 +169,95 @@ export const useAppStore = create<AppState>()(
         if (token && teamId) {
           try {
             const client = new ClickUpClient(token);
-            await client.startTimeEntry(teamId, taskId);
+            const entry = await client.startTimeEntry(teamId, taskId, taskName);
+            if (entry?.id) {
+              const startTimestamp = entry.start ? Number(entry.start) : now;
+              const actualElapsed = Math.max(0, Math.floor((Date.now() - startTimestamp) / 1000));
+              set((state) => ({
+                activeTimer: state.activeTimer
+                  ? {
+                      ...state.activeTimer,
+                      entryId: entry.id,
+                      startTime: startTimestamp,
+                    }
+                  : null,
+                elapsedSeconds: actualElapsed,
+              }));
+              setTrayTitle(`▶ ${formatTime(actualElapsed)}`);
+            }
           } catch (err) {
-            console.warn("ClickUp API sync error:", err);
+            console.warn("ClickUp API sync error on startTimer:", err);
           }
         }
       },
 
       pauseTimer: async () => {
-        const { activeTimer } = get();
+        const { activeTimer, token, teamId } = get();
         if (!activeTimer) return;
 
+        // Compute current elapsed time before pausing
+        const currentElapsed =
+          (activeTimer.accumulatedSeconds || 0) +
+          (activeTimer.isRunning
+            ? Math.max(0, Math.floor((Date.now() - activeTimer.startTime) / 1000))
+            : 0);
+
         set({
-          activeTimer: { ...activeTimer, isRunning: false },
+          activeTimer: {
+            ...activeTimer,
+            accumulatedSeconds: currentElapsed,
+            isRunning: false,
+          },
+          elapsedSeconds: currentElapsed,
         });
         setTrayTitle("⏸ Paused");
+
+        if (token && teamId) {
+          try {
+            const client = new ClickUpClient(token);
+            await client.stopTimeEntry(teamId);
+            await get().syncTodayTime();
+          } catch (err) {
+            console.warn("ClickUp API sync error on pauseTimer:", err);
+          }
+        }
       },
 
-      resumeTimer: () => {
-        const { activeTimer } = get();
+      resumeTimer: async () => {
+        const { activeTimer, token, teamId } = get();
         if (!activeTimer) return;
 
+        const now = Date.now();
         set({
-          activeTimer: { ...activeTimer, isRunning: true },
+          activeTimer: {
+            ...activeTimer,
+            startTime: now,
+            isRunning: true,
+          },
         });
+
+        const currentElapsed = activeTimer.accumulatedSeconds || 0;
+        setTrayTitle(`▶ ${formatTime(currentElapsed)}`);
+
+        if (token && teamId) {
+          try {
+            const client = new ClickUpClient(token);
+            const entry = await client.startTimeEntry(
+              teamId,
+              activeTimer.taskId,
+              activeTimer.taskName,
+            );
+            if (entry?.id) {
+              set((state) =>
+                state.activeTimer
+                  ? { activeTimer: { ...state.activeTimer, entryId: entry.id } }
+                  : {},
+              );
+            }
+          } catch (err) {
+            console.warn("ClickUp API sync error on resumeTimer:", err);
+          }
+        }
       },
 
       stopTimer: async () => {
@@ -198,32 +277,31 @@ export const useAppStore = create<AppState>()(
           try {
             const client = new ClickUpClient(token);
             await client.stopTimeEntry(teamId);
+            await get().syncTodayTime();
           } catch (err) {
-            console.warn("ClickUp API sync error:", err);
+            console.warn("ClickUp API sync error on stopTimer:", err);
           }
         }
       },
 
       tick: () => {
-        const {
-          activeTimer,
-          elapsedSeconds,
-          isPomodoroActive,
-          pomodoroSecondsRemaining,
-          notificationsEnabled,
-        } = get();
+        const { activeTimer, isPomodoroActive, pomodoroSecondsRemaining, notificationsEnabled } =
+          get();
 
-        // Handle Active Timer
+        // Handle Active Timer with accurate real-time clock calculation
         if (activeTimer && activeTimer.isRunning) {
-          const nextElapsed = elapsedSeconds + 1;
-          set({ elapsedSeconds: nextElapsed });
+          const currentElapsed =
+            (activeTimer.accumulatedSeconds || 0) +
+            Math.max(0, Math.floor((Date.now() - activeTimer.startTime) / 1000));
 
-          // Update menu bar title every few seconds or every second
-          const timeStr = formatTime(nextElapsed);
+          set({ elapsedSeconds: currentElapsed });
+
+          // Update menu bar title
+          const timeStr = formatTime(currentElapsed);
           setTrayTitle(`▶ ${timeStr}`);
 
           // Long session reminder at 2 hours
-          if (nextElapsed === 7200 && notificationsEnabled) {
+          if (currentElapsed === 7200 && notificationsEnabled) {
             notify("Take a Break", "You've been tracking continuously for 2 hours.");
           }
         }
@@ -242,19 +320,152 @@ export const useAppStore = create<AppState>()(
         }
       },
 
+      syncCurrentTimer: async () => {
+        const { token, teamId, user, tasks } = get();
+        if (!token || !teamId) return;
+
+        if (syncTimerPromise) {
+          return syncTimerPromise;
+        }
+
+        syncTimerPromise = (async () => {
+          try {
+            const client = new ClickUpClient(token);
+            const entry = await client.getCurrentTimeEntry(teamId, user?.id);
+
+            if (entry && (!entry.stop || Number(entry.duration) < 0)) {
+              const startTimestamp = Number(entry.start);
+              const now = Date.now();
+              const elapsed = Math.max(0, Math.floor((now - startTimestamp) / 1000));
+              const taskId = entry.task?.id || "";
+              const taskName =
+                entry.task?.name ||
+                tasks.find((t) => t.id === taskId)?.name ||
+                entry.description ||
+                "Active Task";
+
+              set({
+                activeTimer: {
+                  entryId: entry.id,
+                  taskId,
+                  taskName,
+                  startTime: startTimestamp,
+                  accumulatedSeconds: 0,
+                  isRunning: true,
+                },
+                elapsedSeconds: elapsed,
+              });
+
+              setTrayTitle(`▶ ${formatTime(elapsed)}`);
+            } else {
+              // No running timer returned from ClickUp
+              const current = get().activeTimer;
+              // If local state thought a ClickUp-linked timer was running, align with server
+              if (current && (current.entryId || token)) {
+                if (current.isRunning) {
+                  set({
+                    activeTimer: null,
+                    elapsedSeconds: 0,
+                  });
+                  clearTrayTitle();
+                  await get().syncTodayTime();
+                }
+              }
+            }
+          } catch (err) {
+            console.warn("Failed to sync current timer from ClickUp:", err);
+          } finally {
+            syncTimerPromise = null;
+          }
+        })();
+
+        return syncTimerPromise;
+      },
+
+      syncTodayTime: async () => {
+        const { token, teamId, user } = get();
+        if (!token || !teamId) return;
+
+        if (syncTodayPromise) {
+          return syncTodayPromise;
+        }
+
+        syncTodayPromise = (async () => {
+          try {
+            const client = new ClickUpClient(token);
+            const startOfDay = new Date();
+            startOfDay.setHours(0, 0, 0, 0);
+            const endOfDay = new Date();
+            endOfDay.setHours(23, 59, 59, 999);
+
+            const entries = await client.getTimeEntries(
+              teamId,
+              startOfDay.getTime(),
+              endOfDay.getTime(),
+              user?.id,
+            );
+
+            if (Array.isArray(entries)) {
+              let totalSeconds = 0;
+              for (const entry of entries) {
+                const dur = Number(entry.duration);
+                // In ClickUp API, completed entries have positive duration in milliseconds
+                if (dur > 0) {
+                  totalSeconds += Math.floor(dur / 1000);
+                }
+              }
+              set({ todayLoggedSeconds: totalSeconds });
+            }
+          } catch (err) {
+            console.warn("Failed to sync today's time from ClickUp:", err);
+          } finally {
+            syncTodayPromise = null;
+          }
+        })();
+
+        return syncTodayPromise;
+      },
+
+      syncAll: async () => {
+        const { token, teamId } = get();
+        if (!token || !teamId) return;
+
+        set({ isSyncing: true });
+        try {
+          await Promise.allSettled([
+            get().fetchTasks(),
+            get().syncCurrentTimer(),
+            get().syncTodayTime(),
+          ]);
+        } finally {
+          set({ isSyncing: false });
+        }
+      },
+
       fetchTasks: async () => {
         const { token, teamId, user } = get();
         if (!token || !teamId) return;
 
-        set({ isLoadingTasks: true });
-        try {
-          const client = new ClickUpClient(token);
-          const tasks = await client.getTasks(teamId, user?.id);
-          set({ tasks, isLoadingTasks: false });
-        } catch (err) {
-          console.error("Failed to fetch tasks:", err);
-          set({ isLoadingTasks: false });
+        if (fetchTasksPromise) {
+          return fetchTasksPromise;
         }
+
+        set({ isLoadingTasks: true });
+
+        fetchTasksPromise = (async () => {
+          try {
+            const client = new ClickUpClient(token);
+            const tasks = await client.getTasks(teamId, user?.id);
+            set({ tasks, isLoadingTasks: false });
+          } catch (err) {
+            console.error("Failed to fetch tasks:", err);
+            set({ isLoadingTasks: false });
+          } finally {
+            fetchTasksPromise = null;
+          }
+        })();
+
+        return fetchTasksPromise;
       },
 
       updateTaskStatus: async (taskId, newStatus) => {
@@ -307,7 +518,23 @@ export const useAppStore = create<AppState>()(
         dailyGoalHours: state.dailyGoalHours,
         isPinned: state.isPinned,
         notificationsEnabled: state.notificationsEnabled,
+        activeTimer: state.activeTimer,
+        todayLoggedSeconds: state.todayLoggedSeconds,
       }),
+      onRehydrateStorage: () => (state) => {
+        if (state?.activeTimer) {
+          if (state.activeTimer.isRunning) {
+            const elapsed =
+              (state.activeTimer.accumulatedSeconds || 0) +
+              Math.max(0, Math.floor((Date.now() - state.activeTimer.startTime) / 1000));
+            state.elapsedSeconds = elapsed;
+            setTrayTitle(`▶ ${formatTime(elapsed)}`);
+          } else {
+            state.elapsedSeconds = state.activeTimer.accumulatedSeconds || 0;
+            setTrayTitle("⏸ Paused");
+          }
+        }
+      },
     },
   ),
 );
