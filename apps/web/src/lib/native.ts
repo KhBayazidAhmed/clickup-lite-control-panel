@@ -57,12 +57,58 @@ export async function hideWindow(): Promise<void> {
   }
 }
 
-export async function notify(title: string, body: string): Promise<void> {
+export async function checkNotificationPermission(): Promise<boolean> {
   if (!isTauri()) {
-    if ("Notification" in window && Notification.permission === "granted") {
-      new Notification(title, { body });
+    return (
+      typeof window !== "undefined" &&
+      "Notification" in window &&
+      Notification.permission === "granted"
+    );
+  }
+  try {
+    return await isPermissionGranted();
+  } catch {
+    return false;
+  }
+}
+
+export async function requestNotificationPermission(): Promise<boolean> {
+  if (!isTauri()) {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      const p = await Notification.requestPermission();
+      return p === "granted";
     }
-    return;
+    return false;
+  }
+  try {
+    const p = await requestPermission();
+    return p === "granted";
+  } catch (err) {
+    console.error("Failed to request notification permission:", err);
+    return false;
+  }
+}
+
+export async function notify(
+  title: string,
+  body: string,
+  sound: string = "Ping",
+): Promise<boolean> {
+  if (!isTauri()) {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "granted") {
+        new Notification(title, { body });
+        return true;
+      }
+      if (Notification.permission !== "denied") {
+        const p = await Notification.requestPermission();
+        if (p === "granted") {
+          new Notification(title, { body });
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   try {
@@ -72,10 +118,14 @@ export async function notify(title: string, body: string): Promise<void> {
       hasPermission = permission === "granted";
     }
     if (hasPermission) {
-      tauriSendNotification({ title, body });
+      tauriSendNotification({ title, body, sound });
+      return true;
     }
+    console.warn("Notification permission was not granted by OS/user.");
+    return false;
   } catch (err) {
     console.error("Failed to trigger native notification:", err);
+    return false;
   }
 }
 
