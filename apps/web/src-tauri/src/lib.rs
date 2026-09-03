@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -28,6 +30,69 @@ fn hide_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+}
+
+#[tauri::command]
+async fn clickup_request(
+    client: tauri::State<'_, reqwest::Client>,
+    method: String,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+) -> Result<String, String> {
+    let mut req = match method.to_uppercase().as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        other => return Err(format!("Unsupported method: {}", other)),
+    };
+
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("ClickUp API Error ({}): {}", status, text));
+    }
+
+    Ok(text)
+}
+
 fn extract_code_from_request(req: &str) -> Option<String> {
     let first_line = req.lines().next()?;
     let path = first_line.split_whitespace().nth(1)?;
@@ -43,51 +108,104 @@ fn extract_code_from_request(req: &str) -> Option<String> {
     None
 }
 
-fn start_oauth_listener(app_handle: AppHandle) {
-    thread::spawn(move || {
-        let listener = match TcpListener::bind("127.0.0.1:3456") {
-            Ok(l) => l,
-            Err(e) => {
-                log::warn!("Failed to bind OAuth listener on 127.0.0.1:3456: {}", e);
-                return;
-            }
-        };
+fn handle_stream(mut stream: std::net::TcpStream, app_handle: &AppHandle) {
+    let mut buffer = [0; 4096];
+    let bytes_read = match stream.read(&mut buffer) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    if bytes_read == 0 {
+        return;
+    }
 
-        for stream in listener.incoming() {
-            if let Ok(mut stream) = stream {
-                let mut buffer = [0; 2048];
-                if let Ok(bytes_read) = stream.read(&mut buffer) {
-                    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-                    if let Some(code) = extract_code_from_request(&request) {
-                        let response_body = r#"<!DOCTYPE html>
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let first_line = request.lines().next().unwrap_or("");
+
+    // Ignore favicon requests
+    if first_line.contains("/favicon.ico") {
+        let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(not_found.as_bytes());
+        return;
+    }
+
+    if let Some(code) = extract_code_from_request(&request) {
+        let html = r#"<!DOCTYPE html>
 <html>
-<head><title>Connected to ClickUp</title></head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #0f172a; color: #ffffff;">
-  <div style="background: #1e293b; padding: 32px; border-radius: 16px; text-align: center; max-width: 420px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155;">
-    <div style="width: 48px; height: 48px; background: #3b82f6; border-radius: 12px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 20px;">✓</div>
-    <h2 style="color: #f8fafc; margin: 0 0 8px 0;">Connected to ClickUp!</h2>
-    <p style="color: #94a3b8; font-size: 14px; line-height: 1.5; margin: 0 0 16px 0;">Authentication complete. You can close this tab and return to the ClickUp Lite Control Panel.</p>
+<head>
+  <meta charset="utf-8">
+  <title>Connected to ClickUp</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: #1e293b; border: 1px solid #334155; padding: 36px 32px; border-radius: 16px; text-align: center; max-width: 420px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    .badge { width: 48px; height: 48px; background: #10b981; border-radius: 12px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; }
+    h2 { margin: 0 0 10px 0; font-size: 20px; }
+    p { color: #94a3b8; font-size: 14px; margin: 0; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">✓</div>
+    <h2>Connected to ClickUp!</h2>
+    <p>Authorization successful. You can close this tab and return to ClickUp Lite.</p>
   </div>
   <script>setTimeout(() => window.close(), 1200);</script>
 </body>
 </html>"#;
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            response_body.len(),
-                            response_body
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            html.len(),
+            html
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
 
-                        // Notify frontend
-                        let _ = app_handle.emit("oauth-code", code);
+        let _ = app_handle.emit("oauth-code", code);
 
-                        // Bring window to front
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
+        if let Some(window) = app_handle.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    } else {
+        let html = r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>ClickUp Lite</title></head>
+<body style="font-family: sans-serif; background: #0f172a; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+  <div style="background: #1e293b; padding: 24px; border-radius: 12px; text-align: center; max-width: 360px;">
+    <h3 style="margin-top: 0;">Authorization Callback</h3>
+    <p style="color: #94a3b8; font-size: 14px;">No authorization code detected in URL.</p>
+  </div>
+</body>
+</html>"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            html.len(),
+            html
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
+}
+
+fn start_oauth_listener(app_handle: AppHandle) {
+    // 1. Listen on IPv4 (127.0.0.1:3456)
+    let app_ipv4 = app_handle.clone();
+    thread::spawn(move || {
+        if let Ok(listener) = TcpListener::bind("127.0.0.1:3456") {
+            for stream in listener.incoming() {
+                if let Ok(stream) = stream {
+                    handle_stream(stream, &app_ipv4);
+                }
+            }
+        }
+    });
+
+    // 2. Listen on IPv6 ([::1]:3456) for modern macOS browsers resolving localhost to IPv6
+    let app_ipv6 = app_handle.clone();
+    thread::spawn(move || {
+        if let Ok(listener) = TcpListener::bind("[::1]:3456") {
+            for stream in listener.incoming() {
+                if let Ok(stream) = stream {
+                    handle_stream(stream, &app_ipv6);
                 }
             }
         }
@@ -96,7 +214,14 @@ fn start_oauth_listener(app_handle: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let http_client = reqwest::Client::builder()
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .pool_idle_timeout(Some(Duration::from_secs(90)))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     tauri::Builder::default()
+        .manage(http_client)
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -161,7 +286,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             update_tray_title,
             clear_tray_title,
-            hide_window
+            hide_window,
+            open_external_url,
+            clickup_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
