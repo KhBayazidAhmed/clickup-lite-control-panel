@@ -7,6 +7,9 @@ import {
   RefreshCw,
   ExternalLink,
   ShieldCheck,
+  Bell,
+  BellOff,
+  Info,
 } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
@@ -25,11 +28,25 @@ const REDIRECT_URI =
   (import.meta.env.VITE_CLICKUP_REDIRECT_URI as string) || "http://localhost:3456/callback";
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const { token, setToken, user, setUser, setTeam, syncAll } = useAppStore();
+  const {
+    token,
+    setToken,
+    user,
+    setUser,
+    setTeam,
+    syncAll,
+    notificationsEnabled,
+    setNotificationsEnabled,
+  } = useAppStore();
 
   const [authMethod, setAuthMethod] = useState<"oauth" | "token">("oauth");
   const [personalTokenInput, setPersonalTokenInput] = useState(token || "");
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isTestingNotification, setIsTestingNotification] = useState(false);
+  const [notificationStatus, setNotificationStatus] = useState<{
+    type: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
   const [statusMessage, setStatusMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -128,14 +145,43 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setStatusMessage({ type: "success", text: "Logged out" });
   };
 
+  const handleTestNotification = async () => {
+    setIsTestingNotification(true);
+    setNotificationStatus(null);
+    try {
+      const ok = await notify(
+        "ClickUp Lite",
+        "Notifications are active! Break and Pomodoro alerts will show here.",
+      );
+      if (ok) {
+        setNotificationStatus({
+          type: "success",
+          text: "Notification triggered! macOS suppresses banners if the app window is focused—switch apps or check Notification Center.",
+        });
+      } else {
+        setNotificationStatus({
+          type: "error",
+          text: "Notification permission was not granted. Please check macOS System Settings > Notifications.",
+        });
+      }
+    } catch (err) {
+      setNotificationStatus({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to trigger notification",
+      });
+    } finally {
+      setIsTestingNotification(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3">
-      <div className="flex flex-col w-full max-w-sm rounded-xl border border-border bg-card shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+      <div className="flex flex-col w-full max-w-sm max-h-[520px] rounded-xl border border-border bg-card shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         {/* Modal Header */}
-        <div className="flex items-center justify-between border-b border-border/80 px-3 py-2 bg-muted/30">
+        <div className="flex items-center justify-between border-b border-border/80 px-3.5 py-2.5 bg-muted/30 shrink-0">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
             <Key className="h-3.5 w-3.5 text-primary" />
-            <span>ClickUp Integration</span>
+            <span>Settings & Notifications</span>
           </div>
           <button
             type="button"
@@ -147,26 +193,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         </div>
 
         {/* Modal Body */}
-        <div className="flex flex-col gap-3 p-3.5 text-xs">
-          {/* Auth Method Switcher */}
-          <div className="flex rounded-lg bg-muted/60 p-0.5">
+        <div className="flex flex-col gap-3.5 p-3.5 text-xs overflow-y-auto">
+          {/* Method Selector */}
+          <div className="flex rounded-lg border border-border bg-muted/40 p-0.5">
             <button
               type="button"
               onClick={() => setAuthMethod("oauth")}
-              className={`flex-1 rounded-md py-1 text-center font-medium transition-all ${
+              className={`flex-1 rounded-md py-1 text-center font-medium transition-colors cursor-pointer ${
                 authMethod === "oauth"
-                  ? "bg-background text-foreground shadow-xs font-semibold"
+                  ? "bg-background text-foreground shadow-xs"
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              ClickUp OAuth
+              OAuth 2.0 (Recommended)
             </button>
             <button
               type="button"
               onClick={() => setAuthMethod("token")}
-              className={`flex-1 rounded-md py-1 text-center font-medium transition-all ${
+              className={`flex-1 rounded-md py-1 text-center font-medium transition-colors cursor-pointer ${
                 authMethod === "token"
-                  ? "bg-background text-foreground shadow-xs font-semibold"
+                  ? "bg-background text-foreground shadow-xs"
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
@@ -267,6 +313,79 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               </button>
             </div>
           )}
+
+          {/* Notification Diagnostics & Settings */}
+          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-medium text-foreground">
+                <Bell className="h-3.5 w-3.5 text-amber-500" />
+                <span>Desktop Notifications</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNotificationsEnabled(!notificationsEnabled)}
+                className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                  notificationsEnabled
+                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-medium"
+                    : "bg-muted text-muted-foreground"
+                }`}
+              >
+                {notificationsEnabled ? (
+                  <>
+                    <Bell className="h-3 w-3" /> Enabled
+                  </>
+                ) : (
+                  <>
+                    <BellOff className="h-3 w-3" /> Muted
+                  </>
+                )}
+              </button>
+            </div>
+
+            <p className="text-[11px] text-muted-foreground leading-tight">
+              Used for 25m Pomodoro breaks and 2-hour continuous work alerts.
+            </p>
+
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={isTestingNotification}
+              onClick={handleTestNotification}
+              className="mt-1 w-full gap-1.5 text-xs cursor-pointer border-dashed"
+            >
+              {isTestingNotification ? (
+                <RefreshCw className="h-3 w-3 animate-spin" />
+              ) : (
+                <Bell className="h-3 w-3 text-primary" />
+              )}
+              <span>Send Test Desktop Notification</span>
+            </Button>
+
+            {notificationStatus && (
+              <div
+                className={`rounded-md p-2 text-[10.5px] leading-relaxed flex items-start gap-1.5 ${
+                  notificationStatus.type === "success"
+                    ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20"
+                    : "bg-destructive/10 text-destructive border border-destructive/20"
+                }`}
+              >
+                {notificationStatus.type === "success" ? (
+                  <CheckCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                )}
+                <span>{notificationStatus.text}</span>
+              </div>
+            )}
+
+            <div className="flex items-start gap-1 text-[10px] text-muted-foreground/80 mt-1">
+              <Info className="h-3 w-3 shrink-0 mt-0.5" />
+              <span>
+                <strong>ClickUp Note:</strong> ClickUp's public API does not provide a notifications
+                or inbox endpoint. Workspace events require webhooks or active timers.
+              </span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
