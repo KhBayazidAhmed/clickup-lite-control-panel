@@ -1,81 +1,87 @@
-# clickup-lite-control-panel
+# ClickUp Lite Control Panel
 
-This project was created with [Better-T-Stack](https://github.com/AmanVarshney01/create-better-t-stack), a modern TypeScript stack that combines React, TanStack Router, and more.
+A sleek, lightweight macOS menu bar companion and control panel for ClickUp. Features instant task synchronization, priority tagging, integrated pomodoro timer, and seamless background operation.
 
 ## Features
 
-- **TypeScript** - For type safety and improved developer experience
-- **TanStack Router** - File-based routing with full type safety
-- **TailwindCSS** - Utility-first CSS for rapid UI development
-- **Shared UI package** - shadcn/ui primitives live in `packages/ui`
-- **Husky** - Git hooks for code quality
-- **Oxlint** - Oxlint + Oxfmt (linting & formatting)
-- **Tauri** - Build native desktop applications
-- **Turborepo** - Optimized monorepo build system
+- **macOS Menu Bar Native App** - Fast, unobtrusive access right from your Mac's top bar
+- **High-Resolution Custom Icon Suite** - Native Apple squircle icon, crisp menu bar template tray icon, and multi-format bundles
+- **Standard Tauri Release Bundles** - Native `.app` bundle and drag-and-drop `.dmg` installer
+- **TypeScript & React** - Full type safety with TanStack Router
+- **TailwindCSS & shadcn/ui** - Modern, responsive UI with dark/light mode support
+- **Tauri v2** - Native macOS bundle with low memory footprint and autostart support
 
-## Getting Started
+## Quick Start
 
-First, install the dependencies:
+### 1. Install Dependencies
 
 ```bash
 bun install
 ```
 
-Then, run the development server:
+### 2. Development Mode
+
+Start the web preview in your browser:
 
 ```bash
 bun run dev
 ```
 
-Open [http://localhost:3001](http://localhost:3001) in your browser to see the web application.
-
-## UI Customization
-
-React web apps in this stack share shadcn/ui primitives through `packages/ui`.
-
-- Change design tokens and global styles in `packages/ui/src/styles/globals.css`
-- Update shared primitives in `packages/ui/src/components/*`
-- Adjust shadcn aliases or style config in `packages/ui/components.json` and `apps/web/components.json`
-
-### Add more shared components
-
-Run this from the project root to add more primitives to the shared UI package:
+Or launch the desktop menu bar app with live reload:
 
 ```bash
-npx shadcn@latest add accordion dialog popover sheet table -c packages/ui
+bun run dev:desktop
 ```
 
-Import shared components like this:
+## Building the Desktop App (macOS `.app` & `.dmg`)
 
-```tsx
-import { Button } from "@clickup-lite-control-panel/ui/components/button";
+To build the release application and native macOS disk image installer (`.dmg`):
+
+```bash
+bun run desktop:build
 ```
 
-### Add app-specific blocks
+The compiled release outputs will be located at:
 
-If you want to add app-specific blocks instead of shared primitives, run the shadcn CLI from `apps/web`.
+- **macOS App Bundle**: `apps/web/src-tauri/target/release/bundle/macos/ClickUp Lite.app`
+- **macOS DMG Installer**: `apps/web/src-tauri/target/release/bundle/dmg/ClickUp Lite_0.1.0_aarch64.dmg`
 
-## Git Hooks and Formatting
+Simply open the `.dmg` file and drag **ClickUp Lite** to **Applications** as with any standard macOS app.
 
-- Initialize hooks: `bun run prepare`
-- Run checks: `bun run check`
+## Icon Generation Suite
+
+All app icons across macOS, Windows, web, and menu bar tray can be regenerated at any time:
+
+```bash
+bun run icons:generate
+```
+
+This generates:
+
+- **Master App Icon** (`apps/web/src-tauri/app-icon.png`): 1024x1024 Apple HIG squircle.
+- **macOS ICNS** (`apps/web/src-tauri/icons/icon.icns`): Multi-resolution icon for Finder, Dock, and Launchpad.
+- **Windows ICO** (`apps/web/src-tauri/icons/icon.ico`) and Store tiles.
+- **macOS Menu Bar Tray Icon** (`apps/web/src-tauri/icons/tray-icon.png`, `tray-icon@2x.png`): Crisp template silhouette adapting dynamically to Dark & Light modes.
+- **Web Favicons** (`apps/web/public/`): `favicon.ico`, `favicon.png`, and `apple-touch-icon.png`.
 
 ## Project Structure
 
 ```
 clickup-lite-control-panel/
 ├── apps/
-│   ├── web/         # Frontend application (React + TanStack Router)
+│   └── web/                # Frontend application (React + TanStack Router + Tauri)
+│       ├── public/         # Web icons and favicons
+│       └── src-tauri/      # Rust native backend, menu bar tray & bundle configs
 ├── packages/
-│   ├── ui/          # Shared shadcn/ui components and styles
+│   └── ui/                 # Shared shadcn/ui components and styles
+└── scripts/
+    └── generate-icons.py   # Multi-platform icon generator
 ```
 
 ## Available Scripts
 
-- `bun run dev`: Start all applications in development mode
-- `bun run build`: Build all applications
-- `bun run dev:web`: Start only the web application
-- `bun run check-types`: Check TypeScript types across all apps
-- `bun run check`: Run Oxlint and Oxfmt
-- `cd apps/web && bun run desktop:dev`: Start Tauri desktop app in development
-- `cd apps/web && bun run desktop:build`: Build Tauri desktop app
+- `bun run dev:desktop`: Start Tauri desktop app with hot reload
+- `bun run desktop:build`: Compile production `.app` and `.dmg` installer
+- `bun run icons:generate`: Recreate all app, tray, and web icon assets
+- `bun run check`: Run Oxlint and Oxfmt code checks
+- `bun run check-types`: Run TypeScript compiler checks across all workspaces
