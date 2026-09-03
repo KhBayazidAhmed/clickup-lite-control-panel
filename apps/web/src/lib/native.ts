@@ -3,6 +3,7 @@ import {
   requestPermission,
   sendNotification as tauriSendNotification,
 } from "@tauri-apps/plugin-notification";
+import { isEnabled, enable, disable } from "@tauri-apps/plugin-autostart";
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -54,6 +55,16 @@ export async function hideWindow(): Promise<void> {
     await invoke("hide_window");
   } catch (err) {
     console.error("Failed to hide window:", err);
+  }
+}
+
+export async function setNativePinned(pinned: boolean): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_pinned", { pinned });
+  } catch (err) {
+    console.error("Failed to set pinned state:", err);
   }
 }
 
@@ -125,6 +136,31 @@ export async function notify(
     return false;
   } catch (err) {
     console.error("Failed to trigger native notification:", err);
+    return false;
+  }
+}
+
+export async function isAutostartEnabled(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await isEnabled();
+  } catch (err) {
+    console.error("Failed to check autostart status:", err);
+    return false;
+  }
+}
+
+export async function setAutostart(enableStartup: boolean): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    if (enableStartup) {
+      await enable();
+    } else {
+      await disable();
+    }
+    return true;
+  } catch (err) {
+    console.error("Failed to update autostart setting:", err);
     return false;
   }
 }

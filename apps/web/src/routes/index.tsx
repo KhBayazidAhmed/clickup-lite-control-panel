@@ -113,6 +113,8 @@ function HomeComponent() {
     window.addEventListener("focus", onWindowFocus);
 
     let unlistenTauriFocus: (() => void) | undefined;
+    let unlistenTraySync: (() => void) | undefined;
+
     if (isTauri()) {
       import("@tauri-apps/api/webviewWindow")
         .then(({ getCurrentWebviewWindow }) => {
@@ -128,6 +130,16 @@ function HomeComponent() {
             .catch(() => {});
         })
         .catch(() => {});
+
+      import("@tauri-apps/api/event")
+        .then(({ listen }) => {
+          listen("tray-sync-requested", () => {
+            syncAll();
+          }).then((unsub) => {
+            unlistenTraySync = unsub;
+          });
+        })
+        .catch(() => {});
     }
 
     return () => {
@@ -136,8 +148,11 @@ function HomeComponent() {
       if (unlistenTauriFocus) {
         unlistenTauriFocus();
       }
+      if (unlistenTraySync) {
+        unlistenTraySync();
+      }
     };
-  }, [handleWakeup]);
+  }, [handleWakeup, syncAll]);
 
   return (
     <div className="flex h-screen w-full flex-col bg-background font-sans text-foreground select-none overflow-hidden antialiased">
@@ -145,7 +160,7 @@ function HomeComponent() {
       <ControlPanelHeader onOpenSettings={() => setIsSettingsOpen(true)} />
 
       {/* Main Content Area */}
-      <div className="flex flex-1 flex-col gap-2.5 overflow-hidden p-3">
+      <div className="flex flex-1 flex-col gap-2 overflow-hidden p-2.5">
         {/* Active Timer Card */}
         <TimerCard />
 

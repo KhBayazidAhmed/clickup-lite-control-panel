@@ -23,13 +23,13 @@ const DigitalClock = React.memo(function DigitalClock() {
   const hasActive = useAppStore((s) => s.activeTimer !== null);
 
   return (
-    <div className="font-mono text-3xl font-bold tracking-tight text-foreground select-none">
+    <div className="font-mono text-2xl font-bold tracking-tight text-foreground tabular-nums select-none leading-none">
       {formatDigital(hasActive ? elapsedSeconds : 0)}
     </div>
   );
 });
 
-// Micro-component for today's summary (minute-level precision)
+// Micro-component for today's summary
 const TodaySummary = React.memo(function TodaySummary() {
   const todayLoggedSeconds = useAppStore((s) => s.todayLoggedSeconds);
   const elapsedSeconds = useAppStore((s) => s.elapsedSeconds);
@@ -37,14 +37,19 @@ const TodaySummary = React.memo(function TodaySummary() {
   const dailyGoalHours = useAppStore((s) => s.dailyGoalHours);
 
   const totalToday = todayLoggedSeconds + (isRunning ? elapsedSeconds : 0);
+  const goalSeconds = dailyGoalHours * 3600;
+  const progressPercent = Math.min(100, Math.round((totalToday / goalSeconds) * 100));
 
   return (
-    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <Flame className="h-3.5 w-3.5 text-amber-500" />
+    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <Flame className="h-3 w-3 text-amber-500 shrink-0" />
       <span>
         Today:{" "}
-        <strong className="font-semibold text-foreground">{formatHoursMinutes(totalToday)}</strong>{" "}
-        / {dailyGoalHours}h
+        <strong className="font-semibold text-foreground">{formatHoursMinutes(totalToday)}</strong>
+        <span className="opacity-60"> / {dailyGoalHours}h</span>
+      </span>
+      <span className="font-mono text-[10px] text-muted-foreground/80 font-medium">
+        ({progressPercent}%)
       </span>
     </div>
   );
@@ -61,10 +66,16 @@ const ProgressBar = React.memo(function ProgressBar() {
   const progressPercent = Math.min(100, Math.round((totalToday / goalSeconds) * 100));
 
   return (
-    <div className="mt-3.5">
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60">
+    <div className="mt-2.5">
+      <div className="h-1 w-full overflow-hidden rounded-full bg-secondary/80">
         <div
-          className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 transition-all duration-500"
+          className={`h-full transition-all duration-500 rounded-full ${
+            progressPercent >= 100
+              ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+              : isRunning
+                ? "bg-foreground shadow-[0_0_8px_rgba(255,255,255,0.4)]"
+                : "bg-muted-foreground/60"
+          }`}
           style={{ width: `${progressPercent}%` }}
         />
       </div>
@@ -92,28 +103,40 @@ export function TimerCard() {
   };
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border/80 bg-card/70 backdrop-blur-md p-4 shadow-sm transition-all">
-      {/* Background Subtle Gradient Glow when active */}
-      {isRunning && (
-        <div className="pointer-events-none absolute -right-6 -top-6 h-28 w-28 rounded-full bg-primary/10 blur-2xl" />
-      )}
-
-      <div className="flex items-center justify-between pb-1">
-        <div className="flex items-center gap-2">
+    <div
+      className={`relative overflow-hidden rounded-lg border p-3 transition-all ${
+        isRunning
+          ? "border-emerald-500/40 bg-card shadow-[0_0_20px_-8px_rgba(16,185,129,0.25)]"
+          : activeTimer
+            ? "border-amber-500/30 bg-card"
+            : "border-border/80 bg-card"
+      }`}
+    >
+      {/* Top Status & Summary Line */}
+      <div className="flex items-center justify-between pb-1.5 border-b border-border/40">
+        <div className="flex items-center gap-1.5">
           <span
-            className={`h-2.5 w-2.5 rounded-full ${
+            className={`h-2 w-2 rounded-full shrink-0 ${
               isRunning
-                ? "bg-emerald-500 animate-pulse ring-4 ring-emerald-500/20"
+                ? "bg-emerald-500 shadow-[0_0_6px_#10b981] animate-pulse"
                 : activeTimer
                   ? "bg-amber-500"
                   : "bg-muted-foreground/40"
             }`}
           />
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {isRunning ? "Tracking Time" : activeTimer ? "Timer Paused" : "Idle"}
+          <span
+            className={`text-[10px] font-bold uppercase tracking-wider ${
+              isRunning
+                ? "text-emerald-400"
+                : activeTimer
+                  ? "text-amber-400"
+                  : "text-muted-foreground"
+            }`}
+          >
+            {isRunning ? "Tracking" : activeTimer ? "Paused" : "Idle"}
           </span>
           {activeTimer?.entryId && (
-            <span className="rounded bg-primary/15 text-primary text-[9px] font-semibold px-1.5 py-0.5 tracking-wide">
+            <span className="rounded border border-border/60 bg-secondary/80 px-1 py-0.2 text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">
               ClickUp
             </span>
           )}
@@ -122,18 +145,20 @@ export function TimerCard() {
         <TodaySummary />
       </div>
 
-      {/* Task Name */}
-      <div className="mt-2 min-h-6">
+      {/* Active Task Name */}
+      <div className="mt-2 min-h-5 flex items-center justify-between gap-2">
         <p
-          className="text-sm font-medium leading-snug line-clamp-1 text-foreground"
+          className={`text-xs font-semibold leading-tight line-clamp-1 truncate ${
+            activeTimer ? "text-foreground" : "text-muted-foreground/80 italic font-normal"
+          }`}
           title={activeTimer?.taskName}
         >
-          {activeTimer?.taskName || "Select a task or press play to start"}
+          {activeTimer?.taskName || "Select a task below or click Start"}
         </p>
       </div>
 
-      {/* Timer Display & Controls */}
-      <div className="mt-3 flex items-center justify-between">
+      {/* Clock Display & Controls */}
+      <div className="mt-2.5 flex items-center justify-between">
         <DigitalClock />
 
         <div className="flex items-center gap-1.5">
@@ -143,48 +168,46 @@ export function TimerCard() {
                 <Button
                   size="icon-sm"
                   variant="secondary"
-                  className="rounded-lg hover:bg-muted cursor-pointer"
+                  className="h-7 w-7 rounded-md bg-secondary hover:bg-secondary/80 cursor-pointer transition-colors"
                   onClick={pauseTimer}
                   title="Pause Timer"
                 >
-                  <Pause className="h-4 w-4 fill-foreground" />
+                  <Pause className="h-3.5 w-3.5 fill-current" />
                 </Button>
               ) : (
                 <Button
                   size="icon-sm"
-                  variant="default"
-                  className="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                  className="h-7 w-7 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white cursor-pointer transition-colors shadow-xs"
                   onClick={resumeTimer}
                   title="Resume Timer"
                 >
-                  <Play className="h-4 w-4 fill-white" />
+                  <Play className="h-3.5 w-3.5 fill-current ml-0.5" />
                 </Button>
               )}
               <Button
                 size="icon-sm"
                 variant="destructive"
-                className="rounded-lg cursor-pointer"
+                className="h-7 w-7 rounded-md cursor-pointer transition-colors"
                 onClick={stopTimer}
                 title="Stop Timer & Log Time"
               >
-                <Square className="h-3.5 w-3.5 fill-current" />
+                <Square className="h-3 w-3 fill-current" />
               </Button>
             </>
           ) : (
             <Button
               size="sm"
-              variant="default"
-              className="gap-1.5 rounded-lg bg-primary hover:bg-primary/90 text-primary-foreground cursor-pointer px-3"
+              className="h-7 gap-1.5 rounded-md bg-foreground hover:bg-foreground/90 text-background cursor-pointer px-3 text-xs font-semibold shadow-xs transition-colors"
               onClick={handleStartDefault}
             >
-              <Play className="h-3.5 w-3.5 fill-primary-foreground" />
+              <Play className="h-3 w-3 fill-current" />
               <span>Start</span>
             </Button>
           )}
         </div>
       </div>
 
-      {/* Today's Goal Progress Bar */}
+      {/* Daily Goal Bar */}
       <ProgressBar />
     </div>
   );

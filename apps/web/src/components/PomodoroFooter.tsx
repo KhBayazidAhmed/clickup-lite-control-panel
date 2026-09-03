@@ -11,28 +11,29 @@ function formatMinutes(seconds: number): string {
 export const PomodoroFooter = React.memo(function PomodoroFooter() {
   const isPomodoroActive = useAppStore((s) => s.isPomodoroActive);
   const pomodoroSecondsRemaining = useAppStore((s) => s.pomodoroSecondsRemaining);
+  const pomodoroDurationMinutes = useAppStore((s) => s.pomodoroDurationMinutes);
   const togglePomodoro = useAppStore((s) => s.togglePomodoro);
   const notificationsEnabled = useAppStore((s) => s.notificationsEnabled);
   const setNotificationsEnabled = useAppStore((s) => s.setNotificationsEnabled);
 
   return (
-    <div className="flex h-9 items-center justify-between border-t border-border/70 px-3 text-[11px] bg-muted/20 select-none">
+    <div className="flex h-8 shrink-0 items-center justify-between border-t border-border/80 px-2.5 text-[11px] bg-card/60 backdrop-blur-md select-none">
       {/* Pomodoro Focus Toggle */}
       <button
         type="button"
         onClick={togglePomodoro}
-        className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-all cursor-pointer ${
+        className={`flex items-center gap-1.5 rounded px-2 py-0.5 transition-all cursor-pointer ${
           isPomodoroActive
-            ? "bg-amber-500/15 text-amber-600 dark:text-amber-400 font-semibold"
-            : "text-muted-foreground hover:bg-muted hover:text-foreground"
+            ? "bg-amber-500/20 text-amber-400 border border-amber-500/30 font-semibold shadow-xs"
+            : "text-muted-foreground hover:bg-secondary hover:text-foreground border border-transparent"
         }`}
-        title="Toggle 25-minute Pomodoro Focus session"
+        title={`Toggle ${pomodoroDurationMinutes}-minute Pomodoro session`}
       >
-        <Timer className={`h-3 w-3 ${isPomodoroActive ? "animate-spin text-amber-500" : ""}`} />
+        <Timer className={`h-3 w-3 ${isPomodoroActive ? "animate-spin text-amber-400" : ""}`} />
         <span>
           {isPomodoroActive
-            ? `Focus: ${formatMinutes(pomodoroSecondsRemaining)}`
-            : "Pomodoro Focus (25m)"}
+            ? `Pomodoro: ${formatMinutes(pomodoroSecondsRemaining)}`
+            : `Pomodoro Focus (${pomodoroDurationMinutes}m)`}
         </span>
       </button>
 
@@ -40,13 +41,16 @@ export const PomodoroFooter = React.memo(function PomodoroFooter() {
       <button
         type="button"
         onClick={() => setNotificationsEnabled(!notificationsEnabled)}
-        className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer px-1 py-0.5"
-        title={notificationsEnabled ? "Notifications enabled" : "Notifications muted"}
+        className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer px-1.5 py-0.5 rounded hover:bg-secondary"
+        title={notificationsEnabled ? "Desktop notifications enabled" : "Notifications muted"}
       >
         {notificationsEnabled ? (
-          <Bell className="h-3 w-3 text-emerald-500" />
+          <>
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            <Bell className="h-3 w-3 text-emerald-400" />
+          </>
         ) : (
-          <BellOff className="h-3 w-3 opacity-50" />
+          <BellOff className="h-3 w-3 opacity-40" />
         )}
       </button>
     </div>

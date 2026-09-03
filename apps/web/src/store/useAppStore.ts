@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { ClickUpClient, ClickUpTask, ClickUpUser } from "../lib/clickup";
-import { notify, setTrayTitle, clearTrayTitle } from "../lib/native";
+import { notify, setTrayTitle, clearTrayTitle, setNativePinned } from "../lib/native";
 
 export interface ActiveTimer {
   entryId?: string;
@@ -10,6 +10,15 @@ export interface ActiveTimer {
   startTime: number;
   accumulatedSeconds?: number;
   isRunning: boolean;
+}
+
+export interface PendingTimeEntry {
+  id: string;
+  taskId: string;
+  taskName: string;
+  start: number;
+  durationMs: number;
+  createdAt: number;
 }
 
 interface AppState {
@@ -25,6 +34,10 @@ interface AppState {
   todayLoggedSeconds: number;
   dailyGoalHours: number;
   isSyncing: boolean;
+
+  // Offline Sync Queue
+  offlineTimeQueue: PendingTimeEntry[];
+  flushOfflineQueue: () => Promise<void>;
 
   // Pomodoro & Notifications
   isPomodoroActive: boolean;
@@ -48,6 +61,8 @@ interface AppState {
   setIsPinned: (pinned: boolean) => void;
   setActiveTab: (tab: "active" | "due" | "all") => void;
   setNotificationsEnabled: (enabled: boolean) => void;
+  setDailyGoalHours: (hours: number) => void;
+  setPomodoroDurationMinutes: (minutes: number) => void;
 
   // Timer Actions
   startTimer: (taskId: string, taskName: string) => Promise<void>;
@@ -69,30 +84,6 @@ interface AppState {
   togglePomodoro: () => void;
 }
 
-const INITIAL_DEMO_TASKS: ClickUpTask[] = [
-  {
-    id: "demo-1",
-    name: "Design menubar popup control panel",
-    status: { status: "in progress", color: "#4B90FF", type: "custom", orderindex: 1 },
-    priority: { priority: "high", color: "#f59e0b" },
-    list: { id: "list-1", name: "Sprint Backlog" },
-  },
-  {
-    id: "demo-2",
-    name: "Connect ClickUp OAuth 2.0 endpoint",
-    status: { status: "to do", color: "#d1d5db", type: "open", orderindex: 0 },
-    priority: { priority: "urgent", color: "#ef4444" },
-    list: { id: "list-1", name: "Sprint Backlog" },
-  },
-  {
-    id: "demo-3",
-    name: "Set up Pomodoro & native break notifications",
-    status: { status: "to do", color: "#d1d5db", type: "open", orderindex: 0 },
-    priority: { priority: "normal", color: "#10b981" },
-    list: { id: "list-2", name: "Enhancements" },
-  },
-];
-
 function formatTime(seconds: number): string {
   const hrs = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
@@ -108,6 +99,7 @@ let syncTimerPromise: Promise<void> | null = null;
 let syncTodayPromise: Promise<void> | null = null;
 let fetchTasksPromise: Promise<void> | null = null;
 let pollTasksPromise: Promise<void> | null = null;
+let flushOfflinePromise: Promise<void> | null = null;
 let taskBaselineEstablished = false;
 const notifiedDueMap = new Map<string, number>();
 
@@ -125,6 +117,8 @@ export const useAppStore = create<AppState>()(
       dailyGoalHours: 8,
       isSyncing: false,
 
+      offlineTimeQueue: [],
+
       isPomodoroActive: false,
       pomodoroSecondsRemaining: 25 * 60,
       pomodoroDurationMinutes: 25,
@@ -133,7 +127,7 @@ export const useAppStore = create<AppState>()(
       isPinned: false,
       activeTab: "active",
 
-      tasks: INITIAL_DEMO_TASKS,
+      tasks: [],
       isLoadingTasks: false,
       lastTaskPollTime: null,
 
@@ -141,14 +135,32 @@ export const useAppStore = create<AppState>()(
         if (!token) {
           taskBaselineEstablished = false;
           notifiedDueMap.clear();
+          set({ token: null, user: null, teamId: null, teamName: null, tasks: [] });
+        } else {
+          set({ token });
         }
-        set({ token });
       },
       setUser: (user) => set({ user }),
       setTeam: (id, name) => set({ teamId: id, teamName: name }),
-      setIsPinned: (isPinned) => set({ isPinned }),
+      setIsPinned: (isPinned) => {
+        set({ isPinned });
+        setNativePinned(isPinned);
+      },
       setActiveTab: (activeTab) => set({ activeTab }),
       setNotificationsEnabled: (notificationsEnabled) => set({ notificationsEnabled }),
+      setDailyGoalHours: (dailyGoalHours) =>
+        set({
+          dailyGoalHours: Math.max(0.5, Math.min(24, Math.round(dailyGoalHours * 10) / 10)),
+        }),
+      setPomodoroDurationMinutes: (pomodoroDurationMinutes) => {
+        const mins = Math.max(5, Math.min(120, Math.round(pomodoroDurationMinutes)));
+        set((state) => ({
+          pomodoroDurationMinutes: mins,
+          pomodoroSecondsRemaining: state.isPomodoroActive
+            ? state.pomodoroSecondsRemaining
+            : mins * 60,
+        }));
+      },
 
       startTimer: async (taskId, taskName) => {
         const { token, teamId, activeTimer, todayLoggedSeconds, elapsedSeconds } = get();
@@ -184,7 +196,7 @@ export const useAppStore = create<AppState>()(
               }));
             }
           } catch (err) {
-            console.warn("ClickUp API sync error on startTimer:", err);
+            console.warn("ClickUp API sync error on startTimer (will track locally):", err);
           }
         }
       },
@@ -252,6 +264,12 @@ export const useAppStore = create<AppState>()(
         const { activeTimer, elapsedSeconds, todayLoggedSeconds, token, teamId } = get();
         if (!activeTimer) return;
 
+        const durationMs = elapsedSeconds * 1000;
+        const startTime = activeTimer.startTime;
+        const taskId = activeTimer.taskId;
+        const taskName = activeTimer.taskName;
+        const hadEntryId = Boolean(activeTimer.entryId);
+
         set({
           activeTimer: null,
           todayLoggedSeconds: todayLoggedSeconds + elapsedSeconds,
@@ -260,15 +278,81 @@ export const useAppStore = create<AppState>()(
 
         clearTrayTitle();
 
-        if (token && teamId) {
+        if (token && teamId && durationMs >= 1000) {
           try {
             const client = new ClickUpClient(token);
-            await client.stopTimeEntry(teamId);
+            if (hadEntryId) {
+              await client.stopTimeEntry(teamId);
+            } else {
+              await client.createTimeEntry(teamId, {
+                start: startTime,
+                duration: durationMs,
+                description: taskName,
+                taskId,
+              });
+            }
             await get().syncTodayTime();
           } catch (err) {
-            console.warn("ClickUp API sync error on stopTimer:", err);
+            console.warn("Failed to log timer online. Enqueuing for offline sync:", err);
+            const pendingEntry: PendingTimeEntry = {
+              id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              taskId,
+              taskName,
+              start: startTime,
+              durationMs,
+              createdAt: Date.now(),
+            };
+            set((state) => ({
+              offlineTimeQueue: [...state.offlineTimeQueue, pendingEntry],
+            }));
+            notify(
+              "Saved Offline",
+              `"${taskName}" (${formatTime(elapsedSeconds)}) will sync when connection returns.`,
+            );
           }
         }
+      },
+
+      flushOfflineQueue: async () => {
+        const { token, teamId, offlineTimeQueue } = get();
+        if (!token || !teamId || offlineTimeQueue.length === 0) return;
+
+        if (flushOfflinePromise) return flushOfflinePromise;
+
+        flushOfflinePromise = (async () => {
+          const client = new ClickUpClient(token);
+          const remaining: PendingTimeEntry[] = [];
+          let syncedCount = 0;
+
+          for (const item of offlineTimeQueue) {
+            try {
+              await client.createTimeEntry(teamId, {
+                start: item.start,
+                duration: item.durationMs,
+                description: item.taskName,
+                taskId: item.taskId,
+              });
+              syncedCount++;
+            } catch (err) {
+              console.warn("Failed to flush offline entry, retaining in queue:", err);
+              remaining.push(item);
+            }
+          }
+
+          set({ offlineTimeQueue: remaining });
+
+          if (syncedCount > 0) {
+            notify(
+              "Offline Time Synced",
+              `Successfully uploaded ${syncedCount} offline session(s) to ClickUp.`,
+            );
+            get().syncTodayTime();
+          }
+        })().finally(() => {
+          flushOfflinePromise = null;
+        });
+
+        return flushOfflinePromise;
       },
 
       tick: () => {
@@ -420,6 +504,7 @@ export const useAppStore = create<AppState>()(
         set({ isSyncing: true });
         try {
           await Promise.allSettled([
+            get().flushOfflineQueue(),
             get().fetchTasks(),
             get().syncCurrentTimer(),
             get().syncTodayTime(),
@@ -572,22 +657,48 @@ export const useAppStore = create<AppState>()(
         teamId: state.teamId,
         teamName: state.teamName,
         dailyGoalHours: state.dailyGoalHours,
+        pomodoroDurationMinutes: state.pomodoroDurationMinutes,
         isPinned: state.isPinned,
         notificationsEnabled: state.notificationsEnabled,
         activeTimer: state.activeTimer,
         todayLoggedSeconds: state.todayLoggedSeconds,
+        offlineTimeQueue: state.offlineTimeQueue || [],
+        tasks: (state.tasks || []).filter((t) => !t.id.startsWith("demo-")),
       }),
       onRehydrateStorage: () => (state) => {
-        if (state?.activeTimer) {
-          if (state.activeTimer.isRunning) {
-            const elapsed =
-              (state.activeTimer.accumulatedSeconds || 0) +
-              Math.max(0, Math.floor((Date.now() - state.activeTimer.startTime) / 1000));
-            state.elapsedSeconds = elapsed;
-            setTrayTitle(`▶ ${formatTime(elapsed)}`);
+        if (state) {
+          // Sync native pin state on rehydration
+          if (typeof state.isPinned === "boolean") {
+            setNativePinned(state.isPinned);
+          }
+
+          // Ensure offlineTimeQueue is initialized as array
+          if (!Array.isArray(state.offlineTimeQueue)) {
+            state.offlineTimeQueue = [];
+          }
+
+          // Clean up any legacy demo tasks
+          if (Array.isArray(state.tasks)) {
+            state.tasks = state.tasks.filter((t) => !t.id.startsWith("demo-"));
           } else {
-            state.elapsedSeconds = state.activeTimer.accumulatedSeconds || 0;
-            setTrayTitle("⏸ Paused");
+            state.tasks = [];
+          }
+
+          if (state.activeTimer?.taskId?.startsWith("demo-")) {
+            state.activeTimer = null;
+            state.elapsedSeconds = 0;
+            clearTrayTitle();
+          } else if (state.activeTimer) {
+            if (state.activeTimer.isRunning) {
+              const elapsed =
+                (state.activeTimer.accumulatedSeconds || 0) +
+                Math.max(0, Math.floor((Date.now() - state.activeTimer.startTime) / 1000));
+              state.elapsedSeconds = elapsed;
+              setTrayTitle(`▶ ${formatTime(elapsed)}`);
+            } else {
+              state.elapsedSeconds = state.activeTimer.accumulatedSeconds || 0;
+              setTrayTitle("⏸ Paused");
+            }
           }
         }
       },

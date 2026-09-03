@@ -6,13 +6,12 @@ export interface ClickUpUser {
   email: string;
   color?: string;
   profilePicture?: string;
-  initials?: string;
 }
 
 export interface ClickUpTeam {
   id: string;
   name: string;
-  members: Array<{ user: ClickUpUser }>;
+  members: { user: ClickUpUser }[];
 }
 
 export interface ClickUpTask {
@@ -25,19 +24,14 @@ export interface ClickUpTask {
     orderindex: number;
   };
   priority?: {
-    priority: "urgent" | "high" | "normal" | "low";
+    priority: string;
     color: string;
-  } | null;
-  due_date?: string | null;
+  };
+  due_date?: string;
   list?: {
     id: string;
     name: string;
   };
-  project?: {
-    id: string;
-    name: string;
-  };
-  time_spent?: number;
 }
 
 export interface ClickUpTimeEntry {
@@ -45,17 +39,13 @@ export interface ClickUpTimeEntry {
   task?: {
     id: string;
     name: string;
-    status?: {
-      status: string;
-      color: string;
-    };
-  } | null;
-  wid?: string;
-  user?: ClickUpUser;
-  billable?: boolean;
+  };
+  wid: string;
+  user: ClickUpUser;
+  billable: boolean;
   start: string | number;
-  stop?: string | number | null;
-  duration?: number | string;
+  stop?: string | number;
+  duration: string | number;
   description?: string;
   at?: string | number;
 }
@@ -193,18 +183,45 @@ export class ClickUpClient {
   }
 
   async stopTimeEntry(teamId: string): Promise<ClickUpTimeEntry | null> {
-    try {
-      const data = await this.request<{ data: ClickUpTimeEntry }>(
-        `/team/${teamId}/time_entries/stop`,
-        {
-          method: "POST",
-        },
-      );
-      return data?.data ?? null;
-    } catch (err) {
-      console.warn("ClickUp stopTimeEntry error:", err);
-      return null;
+    const data = await this.request<{ data: ClickUpTimeEntry }>(
+      `/team/${teamId}/time_entries/stop`,
+      {
+        method: "POST",
+      },
+    );
+    return data?.data ?? null;
+  }
+
+  async createTimeEntry(
+    teamId: string,
+    entry: {
+      start: number;
+      duration: number; // in milliseconds
+      description?: string;
+      taskId?: string;
+    },
+  ): Promise<ClickUpTimeEntry | null> {
+    const isRealTask =
+      entry.taskId &&
+      !entry.taskId.startsWith("demo-") &&
+      entry.taskId !== "general" &&
+      !entry.taskId.startsWith("task-");
+
+    const body: Record<string, unknown> = {
+      start: entry.start,
+      duration: entry.duration,
+      description: entry.description || "",
+      billable: false,
+    };
+    if (isRealTask) {
+      body.tid = entry.taskId;
     }
+
+    const data = await this.request<{ data: ClickUpTimeEntry }>(`/team/${teamId}/time_entries`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return data?.data ?? null;
   }
 }
 

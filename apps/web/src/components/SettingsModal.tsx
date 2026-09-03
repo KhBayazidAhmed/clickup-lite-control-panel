@@ -6,14 +6,25 @@ import {
   AlertCircle,
   RefreshCw,
   ExternalLink,
-  ShieldCheck,
   Bell,
   BellOff,
   Info,
+  Target,
+  Timer,
+  Rocket,
+  CloudOff,
+  CloudCheck,
 } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
-import { isTauri, notify, openExternalUrl, clearTrayTitle } from "../lib/native";
+import {
+  isTauri,
+  notify,
+  openExternalUrl,
+  clearTrayTitle,
+  isAutostartEnabled,
+  setAutostart,
+} from "../lib/native";
 import { listen } from "@tauri-apps/api/event";
 import { Button } from "@clickup-lite-control-panel/ui/components/button";
 
@@ -35,13 +46,22 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setUser,
     setTeam,
     syncAll,
+    dailyGoalHours,
+    setDailyGoalHours,
+    pomodoroDurationMinutes,
+    setPomodoroDurationMinutes,
     notificationsEnabled,
     setNotificationsEnabled,
+    offlineTimeQueue,
+    flushOfflineQueue,
   } = useAppStore();
 
   const [authMethod, setAuthMethod] = useState<"oauth" | "token">("oauth");
   const [personalTokenInput, setPersonalTokenInput] = useState(token || "");
+  const [customGoalInput, setCustomGoalInput] = useState(String(dailyGoalHours));
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isFlushingOffline, setIsFlushingOffline] = useState(false);
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [isTestingNotification, setIsTestingNotification] = useState(false);
   const [notificationStatus, setNotificationStatus] = useState<{
     type: "success" | "error" | "info";
@@ -51,6 +71,69 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     type: "success" | "error";
     text: string;
   } | null>(null);
+
+  useEffect(() => {
+    setCustomGoalInput(String(dailyGoalHours));
+  }, [dailyGoalHours]);
+
+  const handleCustomGoalChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setCustomGoalInput(val);
+    const parsed = parseFloat(val);
+    if (!isNaN(parsed) && parsed >= 0.5 && parsed <= 24) {
+      setDailyGoalHours(parsed);
+    }
+  };
+
+  const handleCustomGoalBlur = () => {
+    const parsed = parseFloat(customGoalInput);
+    if (isNaN(parsed) || parsed < 0.5) {
+      setDailyGoalHours(8);
+      setCustomGoalInput("8");
+    } else if (parsed > 24) {
+      setDailyGoalHours(24);
+      setCustomGoalInput("24");
+    } else {
+      const rounded = Math.round(parsed * 10) / 10;
+      setDailyGoalHours(rounded);
+      setCustomGoalInput(String(rounded));
+    }
+  };
+
+  // Check launch at login state when opening modal
+  useEffect(() => {
+    if (isOpen) {
+      isAutostartEnabled().then((enabled) => {
+        setAutostartEnabled(enabled);
+      });
+    }
+  }, [isOpen]);
+
+  const handleToggleAutostart = async () => {
+    const next = !autostartEnabled;
+    const ok = await setAutostart(next);
+    if (ok) {
+      setAutostartEnabled(next);
+      setStatusMessage({
+        type: "success",
+        text: next ? "Launch at login enabled" : "Launch at login disabled",
+      });
+    } else {
+      setStatusMessage({
+        type: "error",
+        text: "Failed to update launch at login setting",
+      });
+    }
+  };
+
+  const handleManualFlushOffline = async () => {
+    setIsFlushingOffline(true);
+    try {
+      await flushOfflineQueue();
+    } finally {
+      setIsFlushingOffline(false);
+    }
+  };
 
   const handleVerifyToken = async (tokenToTest: string) => {
     setIsVerifying(true);
@@ -176,12 +259,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3">
-      <div className="flex flex-col w-full max-w-sm max-h-[520px] rounded-xl border border-border bg-card shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+      <div className="flex flex-col w-full max-w-sm max-h-[540px] rounded-xl border border-border bg-card shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         {/* Modal Header */}
         <div className="flex items-center justify-between border-b border-border/80 px-3.5 py-2.5 bg-muted/30 shrink-0">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
             <Key className="h-3.5 w-3.5 text-primary" />
-            <span>Settings & Notifications</span>
+            <span>Settings & Preferences</span>
           </div>
           <button
             type="button"
@@ -221,27 +304,17 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           </div>
 
           {authMethod === "oauth" ? (
-            <div className="flex flex-col gap-3">
-              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-2.5 text-emerald-600 dark:text-emerald-400">
-                <div className="flex items-center gap-1.5 font-medium">
-                  <ShieldCheck className="h-4 w-4" />
-                  <span>Credentials Configured in .env</span>
-                </div>
-                <p className="mt-1 text-[11px] text-muted-foreground leading-relaxed">
-                  Clicking below will launch your default web browser to authorize ClickUp Lite.
-                </p>
-              </div>
-
+            <div className="flex flex-col gap-2">
               <Button
-                size="default"
+                size="sm"
                 disabled={isVerifying}
                 onClick={handleStartOAuth}
-                className="w-full gap-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-medium shadow-md cursor-pointer py-2"
+                className="w-full gap-1.5 rounded-lg bg-primary hover:bg-primary text-primary-foreground cursor-pointer"
               >
                 {isVerifying ? (
-                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <RefreshCw className="h-3 w-3 animate-spin" />
                 ) : (
-                  <ExternalLink className="h-4 w-4" />
+                  <ExternalLink className="h-3 w-3" />
                 )}
                 <span>{isVerifying ? "Exchanging token..." : "Connect with ClickUp"}</span>
               </Button>
@@ -314,6 +387,139 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
           )}
 
+          {/* Productivity & Focus Goals */}
+          <div className="flex flex-col gap-2.5 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <div className="flex items-center gap-1.5 font-medium text-foreground">
+              <Target className="h-3.5 w-3.5 text-primary" />
+              <span>Daily Target & Focus Session</span>
+            </div>
+
+            {/* Daily Goal Hours: Custom Input + Presets */}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-muted-foreground">Daily Work Goal:</span>
+                <div className="flex items-center gap-1">
+                  <div className="relative flex items-center">
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0.5"
+                      max="24"
+                      value={customGoalInput}
+                      onFocus={(e) => e.target.select()}
+                      onChange={handleCustomGoalChange}
+                      onBlur={handleCustomGoalBlur}
+                      placeholder="8"
+                      className="h-6 w-14 rounded-md border border-border bg-background px-1.5 pr-4 text-center text-xs font-semibold text-foreground focus:border-foreground focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <span className="pointer-events-none absolute right-1.5 text-[10px] text-muted-foreground">
+                      h
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Quick Presets */}
+              <div className="flex items-center gap-1">
+                {[4, 6, 7.5, 8, 10].map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => {
+                      setDailyGoalHours(item);
+                      setCustomGoalInput(String(item));
+                    }}
+                    className={`flex-1 h-5.5 rounded text-[10px] font-medium transition-colors cursor-pointer ${
+                      dailyGoalHours === item
+                        ? "bg-foreground text-background shadow-xs font-bold"
+                        : "bg-muted text-muted-foreground hover:text-foreground"
+                    }`}
+                    title={item === 7.5 ? "7 hours 30 minutes" : `${item} hours`}
+                  >
+                    {item}h
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Pomodoro Duration */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                <Timer className="h-3 w-3 text-amber-500" />
+                <span>Pomodoro Focus:</span>
+              </div>
+              <div className="flex items-center gap-1">
+                {[15, 20, 25, 30, 45].map((mins) => (
+                  <button
+                    key={mins}
+                    type="button"
+                    onClick={() => setPomodoroDurationMinutes(mins)}
+                    className={`h-6 rounded px-1.5 text-[10.5px] font-medium transition-colors cursor-pointer ${
+                      pomodoroDurationMinutes === mins
+                        ? "bg-amber-500 text-white shadow-xs font-semibold"
+                        : "bg-muted text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {mins}m
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* System & Launch Settings */}
+          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-medium text-foreground">
+                <Rocket className="h-3.5 w-3.5 text-indigo-500" />
+                <span>Launch at Login</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleToggleAutostart}
+                className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                  autostartEnabled
+                    ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 font-medium"
+                    : "bg-muted text-muted-foreground"
+                }`}
+              >
+                {autostartEnabled ? "Enabled" : "Disabled"}
+              </button>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-tight">
+              Automatically launch ClickUp Lite in your macOS menu bar upon system startup.
+            </p>
+          </div>
+
+          {/* Offline Sync Queue Section */}
+          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-medium text-foreground">
+                {offlineTimeQueue.length > 0 ? (
+                  <CloudOff className="h-3.5 w-3.5 text-amber-500" />
+                ) : (
+                  <CloudCheck className="h-3.5 w-3.5 text-emerald-500" />
+                )}
+                <span>Offline Storage & Sync</span>
+              </div>
+              {offlineTimeQueue.length > 0 && (
+                <button
+                  type="button"
+                  disabled={isFlushingOffline}
+                  onClick={handleManualFlushOffline}
+                  className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium hover:bg-amber-500/25 cursor-pointer disabled:opacity-50"
+                >
+                  {isFlushingOffline ? "Syncing..." : "Sync Now"}
+                </button>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-tight">
+              {offlineTimeQueue.length > 0
+                ? `${offlineTimeQueue.length} session(s) pending sync to ClickUp. Will auto-upload when internet reconnects.`
+                : "All timer sessions are synced to ClickUp. Safe to track time offline anytime."}
+            </p>
+          </div>
+
           {/* Notification Diagnostics & Settings */}
           <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
             <div className="flex items-center justify-between">
@@ -343,7 +549,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
 
             <p className="text-[11px] text-muted-foreground leading-tight">
-              Used for 25m Pomodoro breaks and 2-hour continuous work alerts.
+              Used for {pomodoroDurationMinutes}m Pomodoro breaks and 2-hour continuous work alerts.
             </p>
 
             <Button

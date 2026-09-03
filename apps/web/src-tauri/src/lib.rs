@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use tauri::menu::{Menu, MenuItem};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -27,6 +30,12 @@ fn hide_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_pinned(state: tauri::State<'_, Arc<AtomicBool>>, pinned: bool) -> Result<(), String> {
+    state.store(pinned, Ordering::SeqCst);
     Ok(())
 }
 
@@ -220,11 +229,18 @@ pub fn run() {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
+    let is_pinned = Arc::new(AtomicBool::new(false));
+
     tauri::Builder::default()
         .manage(http_client)
+        .manage(is_pinned.clone())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -242,12 +258,43 @@ pub fn run() {
             // Start loopback server for ClickUp OAuth callback on localhost:3456
             start_oauth_listener(app.handle().clone());
 
+            // Build Right-Click Context Menu for the Tray
+            let show_i = MenuItem::with_id(app, "toggle_window", "Open / Close Panel", true, None::<&str>)?;
+            let sync_i = MenuItem::with_id(app, "sync_clickup", "Sync with ClickUp", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit_app", "Quit ClickUp Lite", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &sync_i, &quit_i])?;
+
             // Create menubar tray icon
             let icon = app.default_window_icon().cloned().expect("missing default window icon");
             let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(icon)
                 .icon_as_template(true)
                 .tooltip("ClickUp Lite")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "toggle_window" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let is_visible = window.is_visible().unwrap_or(false);
+                                if is_visible {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.move_window(Position::TrayCenter);
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                        "sync_clickup" => {
+                            let _ = app.emit("tray-sync-requested", ());
+                        }
+                        "quit_app" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
                     if let tauri::tray::TrayIconEvent::Click {
@@ -271,12 +318,15 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Hide window on blur (clicking outside the popup)
+            // Hide window on blur (clicking outside the popup) ONLY IF NOT PINNED
             if let Some(window) = app.get_webview_window("main") {
                 let win_clone = window.clone();
+                let pinned_state = is_pinned.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::Focused(false) = event {
-                        let _ = win_clone.hide();
+                        if !pinned_state.load(Ordering::SeqCst) {
+                            let _ = win_clone.hide();
+                        }
                     }
                 });
             }
@@ -287,6 +337,7 @@ pub fn run() {
             update_tray_title,
             clear_tray_title,
             hide_window,
+            set_pinned,
             open_external_url,
             clickup_request
         ])
