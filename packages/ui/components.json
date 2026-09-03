@@ -1,0 +1,24 @@
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "base-lyra",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/styles/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "iconLibrary": "lucide",
+  "aliases": {
+    "components": "@clickup-lite-control-panel/ui/components",
+    "utils": "@clickup-lite-control-panel/ui/lib/utils",
+    "hooks": "@clickup-lite-control-panel/ui/hooks",
+    "lib": "@clickup-lite-control-panel/ui/lib",
+    "ui": "@clickup-lite-control-panel/ui/components"
+  },
+  "menuColor": "default",
+  "menuAccent": "subtle",
+  "registries": {}
+}

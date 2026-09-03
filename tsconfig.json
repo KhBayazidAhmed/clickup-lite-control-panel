@@ -1,0 +1,3 @@
+{
+  "extends": "@clickup-lite-control-panel/config/tsconfig.base.json"
+}
