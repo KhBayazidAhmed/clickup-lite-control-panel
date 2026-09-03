@@ -1,22 +1,22 @@
-import React from "react";
-import { Pin, Settings, X, Moon, Sun, RefreshCw } from "lucide-react";
-import { useAppStore } from "../store/useAppStore";
-import { hideWindow } from "../lib/native";
-import { useTheme } from "next-themes";
+import { useTheme } from "@/components/theme-provider";
+import { useAppStore } from "@/store";
+import { Moon, RefreshCw, Settings, Sun, X } from "lucide-react";
 
-interface HeaderProps {
+interface ControlPanelHeaderProps {
   onOpenSettings: () => void;
+  onClose: () => void;
+  onSync: () => void;
+  isSyncing: boolean;
 }
 
-export const ControlPanelHeader = React.memo(function ControlPanelHeader({
+export function ControlPanelHeader({
   onOpenSettings,
-}: HeaderProps) {
-  const isPinned = useAppStore((s) => s.isPinned);
-  const setIsPinned = useAppStore((s) => s.setIsPinned);
+  onClose,
+  onSync,
+  isSyncing,
+}: ControlPanelHeaderProps) {
   const user = useAppStore((s) => s.user);
   const teamName = useAppStore((s) => s.teamName);
-  const syncAll = useAppStore((s) => s.syncAll);
-  const isSyncing = useAppStore((s) => s.isSyncing);
   const token = useAppStore((s) => s.token);
   const { theme, setTheme } = useTheme();
 
@@ -27,8 +27,28 @@ export const ControlPanelHeader = React.memo(function ControlPanelHeader({
     >
       {/* Left: App Logo & Workspace Tag */}
       <div className="flex items-center gap-2 min-w-0" data-tauri-drag-region>
-        <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-foreground text-background font-black text-[10px] tracking-tight shadow-xs">
-          CU
+        <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-zinc-900 border border-zinc-700/60 shadow-xs">
+          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+            <defs>
+              <linearGradient id="headerCuChevron" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#FF007A" />
+                <stop offset="100%" stopColor="#7B68EE" />
+              </linearGradient>
+            </defs>
+            <path
+              d="M4.5 11L12 4.5L19.5 11"
+              stroke="url(#headerCuChevron)"
+              strokeWidth="3.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M6 16C8 18.5 16 18.5 18 16"
+              stroke="#00D2FF"
+              strokeWidth="3.2"
+              strokeLinecap="round"
+            />
+          </svg>
         </div>
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-xs font-semibold text-foreground tracking-tight whitespace-nowrap">
@@ -58,57 +78,44 @@ export const ControlPanelHeader = React.memo(function ControlPanelHeader({
         {token && (
           <button
             type="button"
-            onClick={() => syncAll()}
+            onClick={onSync}
             disabled={isSyncing}
-            className={`flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer ${
-              isSyncing ? "text-foreground" : ""
-            }`}
-            title={isSyncing ? "Syncing with ClickUp..." : "Sync Now"}
+            title="Sync Tasks"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`h-3 w-3 ${isSyncing ? "animate-spin" : ""}`} />
+            <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin text-primary" : ""}`} />
           </button>
         )}
 
         <button
           type="button"
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
-          title="Toggle Dark/Light Theme"
+          title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
         >
-          {theme === "dark" ? <Sun className="h-3 w-3" /> : <Moon className="h-3 w-3" />}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setIsPinned(!isPinned)}
-          className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors cursor-pointer ${
-            isPinned
-              ? "bg-foreground text-background shadow-xs font-bold"
-              : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-          }`}
-          title={isPinned ? "Pinned (Always on top)" : "Pin Window"}
-        >
-          <Pin className={`h-3 w-3 ${isPinned ? "fill-current" : ""}`} />
+          {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
         </button>
 
         <button
           type="button"
           onClick={onOpenSettings}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors cursor-pointer"
           title="Settings"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
         >
-          <Settings className="h-3 w-3" />
+          <Settings className="h-3.5 w-3.5" />
         </button>
+
+        <div className="h-3 w-px bg-border/60 mx-0.5" />
 
         <button
           type="button"
-          onClick={hideWindow}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/15 hover:text-destructive transition-colors cursor-pointer ml-0.5"
-          title="Close to Tray"
+          onClick={onClose}
+          title="Hide Window"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
         >
-          <X className="h-3 w-3" />
+          <X className="h-3.5 w-3.5" />
         </button>
       </div>
     </div>
   );
-});
+}
