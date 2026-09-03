@@ -1,6 +1,6 @@
 import { Toaster } from "@clickup-lite-control-panel/ui/components/sonner";
 import { HeadContent, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
-import { ThemeProvider } from "@/components/theme-provider";
+import { ThemeProvider } from "../components/theme-provider";
 import "../index.css";
 
 export interface RouterAppContext {}
