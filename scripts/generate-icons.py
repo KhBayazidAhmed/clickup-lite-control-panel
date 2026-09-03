@@ -10,7 +10,7 @@ Generates:
 
 import os
 import subprocess
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TAURI_ICONS_DIR = os.path.join(PROJECT_ROOT, "apps", "web", "src-tauri", "icons")
@@ -20,56 +20,91 @@ MASTER_ICON = os.path.join(PROJECT_ROOT, "apps", "web", "src-tauri", "app-icon.p
 os.makedirs(TAURI_ICONS_DIR, exist_ok=True)
 os.makedirs(PUBLIC_DIR, exist_ok=True)
 
-LIGHT_MINIMALIST_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+CLICKUP_LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="0 0 24 24">
   <defs>
-    <filter id="dropShadow" x="-10%" y="-5%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#000000" flood-opacity="0.28" />
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.15" />
-    </filter>
-
-    <linearGradient id="chevronGradLight" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stopColor="#FF007F" />
-      <stop offset="100%" stopColor="#7B68EE" />
+    <linearGradient id="chevronGrad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FF007F" />
+      <stop offset="100%" stop-color="#7B68EE" />
     </linearGradient>
-
-    <linearGradient id="arcGradLight" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stopColor="#00E5FF" />
-      <stop offset="100%" stopColor="#00B0FF" />
-    </linearGradient>
-
-    <linearGradient id="bgLight" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stopColor="#FFFFFF" />
-      <stop offset="100%" stopColor="#F1F3F8" />
+    <linearGradient id="arcGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="100%" stop-color="#00B0FF" />
     </linearGradient>
   </defs>
-
-  <!-- Shadow & Main White Squircle Tile -->
-  <rect x="100" y="92" width="824" height="824" rx="185" fill="url(#bgLight)" filter="url(#dropShadow)" />
-
-  <!-- Crisp Outer & Inner Subtle Borders -->
-  <rect x="100" y="92" width="824" height="824" rx="185" fill="none" stroke="#E2E8F0" stroke-width="3" />
-  <rect x="102" y="94" width="820" height="820" rx="183" fill="none" stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="2" />
-
-  <!-- Centered ClickUp Logo -->
-  <g transform="translate(272, 264) scale(20)">
-    <path fill="url(#chevronGradLight)" d="M12.04 6.15l-6.568 5.66-3.036-3.52L12.055 0l9.543 8.296-3.05 3.509z"/>
-    <path fill="url(#arcGradLight)" d="M2 18.439l3.69-2.828c1.961 2.56 4.044 3.739 6.363 3.739 2.307 0 4.33-1.166 6.203-3.704L22 18.405C19.298 22.065 15.941 24 12.053 24C8.178 24 4.788 22.078 2 18.439z"/>
-  </g>
+  <path fill="url(#chevronGrad)" d="M12.04 6.15l-6.568 5.66-3.036-3.52L12.055 0l9.543 8.296-3.05 3.509z"/>
+  <path fill="url(#arcGrad)" d="M2 18.439l3.69-2.828c1.961 2.56 4.044 3.739 6.363 3.739 2.307 0 4.33-1.166 6.203-3.704L22 18.405C19.298 22.065 15.941 24 12.053 24C8.178 24 4.788 22.078 2 18.439z"/>
 </svg>"""
 
 def generate_master_icon():
     print("Generating master 1024x1024 Light Minimalist icon...")
-    tmp_svg = "/tmp/clickup_master.svg"
-    with open(tmp_svg, "w") as f:
-        f.write(LIGHT_MINIMALIST_SVG)
+    size = 1024
+    pad = 96
+    tile_w = size - pad * 2
+    tile_h = size - pad * 2
+    radius = 185
+
+    # 1. Soft macOS drop shadow
+    shadow_canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow_canvas)
+    shadow_draw.rounded_rectangle(
+        [pad, pad + 18, pad + tile_w, pad + tile_h + 18],
+        radius=radius,
+        fill=(0, 0, 0, 75)
+    )
+    shadow_blurred = shadow_canvas.filter(ImageFilter.GaussianBlur(radius=24))
+
+    # 2. White to light-gray squircle tile
+    tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+    tile_draw = ImageDraw.Draw(tile)
+    for y in range(tile_h):
+        ratio = y / float(tile_h)
+        r = int(255 * (1 - ratio) + 242 * ratio)
+        g = int(255 * (1 - ratio) + 244 * ratio)
+        b = int(255 * (1 - ratio) + 248 * ratio)
+        tile_draw.line([(0, y), (tile_w, y)], fill=(r, g, b, 255))
+
+    # Rounded squircle mask
+    mask = Image.new("L", (tile_w, tile_h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle([0, 0, tile_w, tile_h], radius=radius, fill=255)
+
+    # Crisp borders
+    tile_draw.rounded_rectangle(
+        [0, 0, tile_w - 1, tile_h - 1],
+        radius=radius,
+        outline=(226, 232, 240, 255),
+        width=4
+    )
+    tile_draw.rounded_rectangle(
+        [2, 2, tile_w - 3, tile_h - 3],
+        radius=radius,
+        outline=(255, 255, 255, 220),
+        width=2
+    )
+
+    tile_masked = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+    tile_masked.paste(tile, (0, 0), mask=mask)
+
+    composite = Image.alpha_composite(shadow_blurred, Image.new("RGBA", (size, size), (0, 0, 0, 0)))
+    composite.paste(tile_masked, (pad, pad), mask=mask)
+
+    # 3. Vector ClickUp Brand Logo
+    tmp_logo_svg = "/tmp/clickup_logo_vector.svg"
+    tmp_logo_png = "/tmp/clickup_logo_vector.png"
+    with open(tmp_logo_svg, "w") as f:
+        f.write(CLICKUP_LOGO_SVG)
+
     subprocess.run([
         "/opt/homebrew/bin/rsvg-convert",
-        "-w", "1024",
-        "-h", "1024",
-        "-f", "png",
-        "-o", MASTER_ICON,
-        tmp_svg
+        "-w", "480",
+        "-h", "480",
+        "-o", tmp_logo_png,
+        tmp_logo_svg
     ], check=True)
+
+    logo_img = Image.open(tmp_logo_png)
+    composite.paste(logo_img, (272, 272), mask=logo_img)
+    composite.save(MASTER_ICON, "PNG")
     print("  ✓ app-icon.png (1024x1024)")
 
 def generate_tray_icons():
