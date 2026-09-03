@@ -1,4 +1,5 @@
-import { Pin, Settings, X, Moon, Sun } from "lucide-react";
+import React from "react";
+import { Pin, Settings, X, Moon, Sun, RefreshCw } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { hideWindow } from "../lib/native";
 import { useTheme } from "next-themes";
@@ -7,8 +8,16 @@ interface HeaderProps {
   onOpenSettings: () => void;
 }
 
-export function ControlPanelHeader({ onOpenSettings }: HeaderProps) {
-  const { isPinned, setIsPinned, user, teamName } = useAppStore();
+export const ControlPanelHeader = React.memo(function ControlPanelHeader({
+  onOpenSettings,
+}: HeaderProps) {
+  const isPinned = useAppStore((s) => s.isPinned);
+  const setIsPinned = useAppStore((s) => s.setIsPinned);
+  const user = useAppStore((s) => s.user);
+  const teamName = useAppStore((s) => s.teamName);
+  const syncAll = useAppStore((s) => s.syncAll);
+  const isSyncing = useAppStore((s) => s.isSyncing);
+  const token = useAppStore((s) => s.token);
   const { theme, setTheme } = useTheme();
 
   return (
@@ -29,8 +38,22 @@ export function ControlPanelHeader({ onOpenSettings }: HeaderProps) {
         </div>
       </div>
 
-      {/* Right: Actions (Theme, Pin, Settings, Close) */}
+      {/* Right: Actions (Sync, Theme, Pin, Settings, Close) */}
       <div className="flex items-center gap-1">
+        {token && (
+          <button
+            type="button"
+            onClick={() => syncAll()}
+            disabled={isSyncing}
+            className={`flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer ${
+              isSyncing ? "text-primary" : ""
+            }`}
+            title={isSyncing ? "Syncing..." : "Sync with ClickUp"}
+          >
+            <RefreshCw className={`h-3 w-3 ${isSyncing ? "animate-spin" : ""}`} />
+          </button>
+        )}
+
         <button
           type="button"
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -73,4 +96,4 @@ export function ControlPanelHeader({ onOpenSettings }: HeaderProps) {
       </div>
     </div>
   );
-}
+});

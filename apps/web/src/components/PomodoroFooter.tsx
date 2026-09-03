@@ -1,3 +1,4 @@
+import React from "react";
 import { Timer, Bell, BellOff } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 
@@ -7,14 +8,12 @@ function formatMinutes(seconds: number): string {
   return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
-export function PomodoroFooter() {
-  const {
-    isPomodoroActive,
-    pomodoroSecondsRemaining,
-    togglePomodoro,
-    notificationsEnabled,
-    setNotificationsEnabled,
-  } = useAppStore();
+export const PomodoroFooter = React.memo(function PomodoroFooter() {
+  const isPomodoroActive = useAppStore((s) => s.isPomodoroActive);
+  const pomodoroSecondsRemaining = useAppStore((s) => s.pomodoroSecondsRemaining);
+  const togglePomodoro = useAppStore((s) => s.togglePomodoro);
+  const notificationsEnabled = useAppStore((s) => s.notificationsEnabled);
+  const setNotificationsEnabled = useAppStore((s) => s.setNotificationsEnabled);
 
   return (
     <div className="flex h-9 items-center justify-between border-t border-border/70 px-3 text-[11px] bg-muted/20 select-none">
@@ -52,4 +51,4 @@ export function PomodoroFooter() {
       </button>
     </div>
   );
-}
+});

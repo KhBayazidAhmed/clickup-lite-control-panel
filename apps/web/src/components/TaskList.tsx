@@ -1,4 +1,4 @@
-import { useState } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import { Play, Pause, Plus, CheckCircle2, Circle, Clock } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpTask } from "../lib/clickup";
@@ -10,18 +10,109 @@ const PRIORITY_COLORS: Record<string, { label: string; class: string }> = {
   low: { label: "Low", class: "bg-gray-500/10 text-gray-400 border-gray-500/20" },
 };
 
+interface TaskRowProps {
+  task: ClickUpTask;
+  isCurrent: boolean;
+  isTimerRunning: boolean;
+  onToggleTimer: (task: ClickUpTask) => void;
+  onCycleStatus: (task: ClickUpTask) => void;
+}
+
+const TaskRow = React.memo(function TaskRow({
+  task,
+  isCurrent,
+  isTimerRunning,
+  onToggleTimer,
+  onCycleStatus,
+}: TaskRowProps) {
+  const statusName = task.status.status.toLowerCase();
+  const isCompleted = statusName.includes("complete") || statusName.includes("closed");
+  const priorityInfo = task.priority?.priority ? PRIORITY_COLORS[task.priority.priority] : null;
+
+  return (
+    <div
+      className={`group flex items-center justify-between gap-2 rounded-lg border p-2 text-xs transition-all ${
+        isCurrent
+          ? "border-primary/50 bg-primary/5 shadow-xs"
+          : "border-border/60 bg-card/40 hover:border-border hover:bg-card/90"
+      }`}
+    >
+      {/* Left: Play / Pause Quick Action */}
+      <button
+        type="button"
+        onClick={() => onToggleTimer(task)}
+        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-all cursor-pointer ${
+          isTimerRunning
+            ? "bg-emerald-500 text-white shadow-xs"
+            : isCurrent
+              ? "bg-amber-500 text-white"
+              : "bg-muted text-muted-foreground hover:bg-primary hover:text-primary-foreground"
+        }`}
+        title={isTimerRunning ? "Pause timer" : "Track time on this task"}
+      >
+        {isTimerRunning ? (
+          <Pause className="h-3 w-3 fill-current" />
+        ) : (
+          <Play className="h-3 w-3 fill-current ml-0.5" />
+        )}
+      </button>
+
+      {/* Middle: Title & Meta */}
+      <div className="flex flex-col flex-1 min-w-0 pr-1">
+        <span
+          className={`truncate font-medium ${
+            isCompleted ? "line-through text-muted-foreground" : "text-foreground"
+          }`}
+        >
+          {task.name}
+        </span>
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+          <span>{task.list?.name || "General"}</span>
+          {priorityInfo && (
+            <span
+              className={`rounded-sm border px-1 py-0.2 text-[9px] font-semibold ${priorityInfo.class}`}
+            >
+              {priorityInfo.label}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Right: 1-Click Status Badge */}
+      <button
+        type="button"
+        onClick={() => onCycleStatus(task)}
+        className={`flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium border transition-colors cursor-pointer ${
+          isCompleted
+            ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
+            : statusName.includes("in progress")
+              ? "bg-blue-500/10 text-blue-500 border-blue-500/20"
+              : "bg-muted text-muted-foreground border-transparent hover:bg-muted/80"
+        }`}
+        title="Click to advance status"
+      >
+        {isCompleted ? (
+          <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+        ) : (
+          <Circle className="h-3 w-3 opacity-60" />
+        )}
+        <span className="capitalize">{task.status.status}</span>
+      </button>
+    </div>
+  );
+});
+
 export function TaskList() {
-  const {
-    tasks,
-    activeTimer,
-    activeTab,
-    setActiveTab,
-    startTimer,
-    pauseTimer,
-    resumeTimer,
-    updateTaskStatus,
-    quickAddTask,
-  } = useAppStore();
+  const tasks = useAppStore((s) => s.tasks);
+  const activeTaskId = useAppStore((s) => s.activeTimer?.taskId);
+  const isTimerRunning = useAppStore((s) => s.activeTimer?.isRunning ?? false);
+  const activeTab = useAppStore((s) => s.activeTab);
+  const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const startTimer = useAppStore((s) => s.startTimer);
+  const pauseTimer = useAppStore((s) => s.pauseTimer);
+  const resumeTimer = useAppStore((s) => s.resumeTimer);
+  const updateTaskStatus = useAppStore((s) => s.updateTaskStatus);
+  const quickAddTask = useAppStore((s) => s.quickAddTask);
 
   const [newTaskTitle, setNewTaskTitle] = useState("");
 
@@ -32,41 +123,53 @@ export function TaskList() {
     }
   };
 
-  const handleToggleTimer = (task: ClickUpTask) => {
-    if (activeTimer?.taskId === task.id) {
-      if (activeTimer.isRunning) {
-        pauseTimer();
+  const handleToggleTimer = useCallback(
+    (task: ClickUpTask) => {
+      if (activeTaskId === task.id) {
+        if (isTimerRunning) {
+          pauseTimer();
+        } else {
+          resumeTimer();
+        }
       } else {
-        resumeTimer();
+        startTimer(task.id, task.name);
       }
-    } else {
-      startTimer(task.id, task.name);
-    }
-  };
+    },
+    [activeTaskId, isTimerRunning, pauseTimer, resumeTimer, startTimer],
+  );
 
-  const handleCycleStatus = (task: ClickUpTask) => {
-    const current = task.status.status.toLowerCase();
-    let nextStatus = "in progress";
-    if (current.includes("in progress")) {
-      nextStatus = "complete";
-    } else if (current.includes("complete") || current.includes("closed")) {
-      nextStatus = "to do";
-    } else {
-      nextStatus = "in progress";
-    }
-    updateTaskStatus(task.id, nextStatus);
-  };
+  const handleCycleStatus = useCallback(
+    (task: ClickUpTask) => {
+      const current = task.status.status.toLowerCase();
+      let nextStatus = "in progress";
+      if (current.includes("in progress")) {
+        nextStatus = "complete";
+      } else if (current.includes("complete") || current.includes("closed")) {
+        nextStatus = "to do";
+      } else {
+        nextStatus = "in progress";
+      }
+      updateTaskStatus(task.id, nextStatus);
+    },
+    [updateTaskStatus],
+  );
 
-  const filteredTasks = tasks.filter((t) => {
-    const status = t.status.status.toLowerCase();
-    if (activeTab === "active") {
-      return !status.includes("complete") && !status.includes("closed");
-    }
-    if (activeTab === "due") {
-      return Boolean(t.due_date);
-    }
-    return true;
-  });
+  const filteredTasks = useMemo(() => {
+    return tasks.filter((t) => {
+      const status = t.status.status.toLowerCase();
+      if (activeTab === "active") {
+        return !status.includes("complete") && !status.includes("closed");
+      }
+      if (activeTab === "due") {
+        return Boolean(t.due_date);
+      }
+      return true;
+    });
+  }, [tasks, activeTab]);
+
+  const activeCount = useMemo(() => {
+    return tasks.filter((t) => !t.status.status.toLowerCase().includes("complete")).length;
+  }, [tasks]);
 
   return (
     <div className="flex flex-col gap-2.5 flex-1 min-h-0">
@@ -82,8 +185,7 @@ export function TaskList() {
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            Active (
-            {tasks.filter((t) => !t.status.status.toLowerCase().includes("complete")).length})
+            Active ({activeCount})
           </button>
           <button
             type="button"
@@ -120,88 +222,16 @@ export function TaskList() {
             <p>No tasks found</p>
           </div>
         ) : (
-          filteredTasks.map((task) => {
-            const isCurrent = activeTimer?.taskId === task.id;
-            const isTimerRunning = isCurrent && activeTimer?.isRunning;
-            const statusName = task.status.status.toLowerCase();
-            const isCompleted = statusName.includes("complete") || statusName.includes("closed");
-            const priorityInfo = task.priority?.priority
-              ? PRIORITY_COLORS[task.priority.priority]
-              : null;
-
-            return (
-              <div
-                key={task.id}
-                className={`group flex items-center justify-between gap-2 rounded-lg border p-2 text-xs transition-all ${
-                  isCurrent
-                    ? "border-primary/50 bg-primary/5 shadow-xs"
-                    : "border-border/60 bg-card/40 hover:border-border hover:bg-card/90"
-                }`}
-              >
-                {/* Left: Play / Pause Quick Action */}
-                <button
-                  type="button"
-                  onClick={() => handleToggleTimer(task)}
-                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-all cursor-pointer ${
-                    isTimerRunning
-                      ? "bg-emerald-500 text-white shadow-xs"
-                      : isCurrent
-                        ? "bg-amber-500 text-white"
-                        : "bg-muted text-muted-foreground hover:bg-primary hover:text-primary-foreground"
-                  }`}
-                  title={isTimerRunning ? "Pause timer" : "Track time on this task"}
-                >
-                  {isTimerRunning ? (
-                    <Pause className="h-3 w-3 fill-current" />
-                  ) : (
-                    <Play className="h-3 w-3 fill-current ml-0.5" />
-                  )}
-                </button>
-
-                {/* Middle: Title & Meta */}
-                <div className="flex flex-col flex-1 min-w-0 pr-1">
-                  <span
-                    className={`truncate font-medium ${
-                      isCompleted ? "line-through text-muted-foreground" : "text-foreground"
-                    }`}
-                  >
-                    {task.name}
-                  </span>
-                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                    <span>{task.list?.name || "General"}</span>
-                    {priorityInfo && (
-                      <span
-                        className={`rounded-sm border px-1 py-0.2 text-[9px] font-semibold ${priorityInfo.class}`}
-                      >
-                        {priorityInfo.label}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Right: 1-Click Status Badge */}
-                <button
-                  type="button"
-                  onClick={() => handleCycleStatus(task)}
-                  className={`flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium border transition-colors cursor-pointer ${
-                    isCompleted
-                      ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
-                      : statusName.includes("in progress")
-                        ? "bg-blue-500/10 text-blue-500 border-blue-500/20"
-                        : "bg-muted text-muted-foreground border-transparent hover:bg-muted/80"
-                  }`}
-                  title="Click to advance status"
-                >
-                  {isCompleted ? (
-                    <CheckCircle2 className="h-3 w-3 text-emerald-500" />
-                  ) : (
-                    <Circle className="h-3 w-3 opacity-60" />
-                  )}
-                  <span className="capitalize">{task.status.status}</span>
-                </button>
-              </div>
-            );
-          })
+          filteredTasks.map((task) => (
+            <TaskRow
+              key={task.id}
+              task={task}
+              isCurrent={activeTaskId === task.id}
+              isTimerRunning={activeTaskId === task.id && isTimerRunning}
+              onToggleTimer={handleToggleTimer}
+              onCycleStatus={handleCycleStatus}
+            />
+          ))
         )}
       </div>
     </div>
