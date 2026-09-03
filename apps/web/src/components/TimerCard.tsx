@@ -88,19 +88,8 @@ export function TimerCard() {
   const pauseTimer = useAppStore((s) => s.pauseTimer);
   const resumeTimer = useAppStore((s) => s.resumeTimer);
   const stopTimer = useAppStore((s) => s.stopTimer);
-  const startTimer = useAppStore((s) => s.startTimer);
-  const tasks = useAppStore((s) => s.tasks);
 
   const isRunning = activeTimer?.isRunning ?? false;
-
-  const handleStartDefault = () => {
-    const firstTask = tasks[0];
-    if (firstTask) {
-      startTimer(firstTask.id, firstTask.name);
-    } else {
-      startTimer("general", "General Focus Session");
-    }
-  };
 
   return (
     <div
@@ -149,11 +138,11 @@ export function TimerCard() {
       <div className="mt-2 min-h-5 flex items-center justify-between gap-2">
         <p
           className={`text-xs font-semibold leading-tight line-clamp-1 truncate ${
-            activeTimer ? "text-foreground" : "text-muted-foreground/80 italic font-normal"
+            activeTimer ? "text-foreground" : "text-muted-foreground/70 italic font-normal"
           }`}
           title={activeTimer?.taskName}
         >
-          {activeTimer?.taskName || "Select a task below or click Start"}
+          {activeTimer?.taskName || "Click ▶ on any task below to start tracking"}
         </p>
       </div>
 
@@ -195,14 +184,13 @@ export function TimerCard() {
               </Button>
             </>
           ) : (
-            <Button
-              size="sm"
-              className="h-7 gap-1.5 rounded-md bg-foreground hover:bg-foreground/90 text-background cursor-pointer px-3 text-xs font-semibold shadow-xs transition-colors"
-              onClick={handleStartDefault}
+            <div
+              className="flex items-center gap-1 rounded-md border border-border/60 bg-secondary/40 px-2 py-1 text-[10.5px] font-medium text-muted-foreground/70 select-none"
+              title="Click the start button (▶) on any task below to begin time tracking"
             >
-              <Play className="h-3 w-3 fill-current" />
-              <span>Start</span>
-            </Button>
+              <Play className="h-2.5 w-2.5 fill-current opacity-60" />
+              <span>Select task</span>
+            </div>
           )}
         </div>
       </div>
