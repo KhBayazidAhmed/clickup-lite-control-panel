@@ -14,6 +14,7 @@ import {
   Rocket,
   CloudOff,
   CloudCheck,
+  Pin,
 } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
@@ -46,6 +47,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setUser,
     setTeam,
     syncAll,
+    isPinned,
+    setIsPinned,
     dailyGoalHours,
     setDailyGoalHours,
     pomodoroDurationMinutes,
@@ -138,94 +141,136 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const handleVerifyToken = async (tokenToTest: string) => {
     setIsVerifying(true);
     setStatusMessage(null);
+
     try {
       const client = new ClickUpClient(tokenToTest);
-      const currentUser = await client.getCurrentUser();
-      const teams = await client.getTeams();
+      const fetchedUser = await client.getCurrentUser();
 
-      setUser(currentUser);
-      setToken(tokenToTest);
-
-      if (teams.length > 0 && teams[0]) {
-        setTeam(teams[0].id, teams[0].name);
+      if (!fetchedUser || !fetchedUser.id) {
+        throw new Error("Could not retrieve user details.");
       }
 
-      await syncAll();
-      setStatusMessage({ type: "success", text: `Connected as ${currentUser.username}!` });
-      notify("ClickUp Connected", `Logged in as ${currentUser.username}`);
-    } catch (err) {
-      console.error(err);
+      const teams = await client.getTeams();
+      const firstTeam = teams?.[0];
+
+      setToken(tokenToTest);
+      setUser(fetchedUser);
+
+      if (firstTeam) {
+        setTeam(firstTeam.id, firstTeam.name);
+      }
+
+      setStatusMessage({
+        type: "success",
+        text: `Connected as ${fetchedUser.username}!`,
+      });
+
+      // Trigger initial background sync
+      setTimeout(() => {
+        syncAll();
+      }, 500);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Token validation failed";
       setStatusMessage({
         type: "error",
-        text: err instanceof Error ? err.message : "Failed to verify credentials",
+        text:
+          msg.includes("401") || msg.includes("OAUTH")
+            ? "Invalid token or unauthorized. Check ClickUp Settings."
+            : `Connection error: ${msg}`,
       });
     } finally {
       setIsVerifying(false);
     }
   };
 
-  // Listen for native OAuth redirect callback on localhost:3456
+  // Listen for OAuth deep link / callback code
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isOpen) return;
 
-    let unlistenFn: (() => void) | undefined;
-    listen<string>("oauth-code", async (event) => {
-      const code = event.payload;
-      if (code) {
-        setIsVerifying(true);
-        setStatusMessage({
-          type: "success",
-          text: "Code received! Exchanging token with ClickUp...",
+    let unlisten: (() => void) | undefined;
+
+    const setupListener = async () => {
+      try {
+        const unsub = await listen<{ code: string }>("oauth-code-received", async (event) => {
+          const code = event.payload.code;
+          if (!code) return;
+
+          setIsVerifying(true);
+          setStatusMessage(null);
+
+          try {
+            const accessToken = await exchangeOAuthCode(CLIENT_ID, CLIENT_SECRET, code);
+
+            if (accessToken) {
+              await handleVerifyToken(accessToken);
+            } else {
+              throw new Error("Failed to receive access token.");
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : "OAuth exchange failed";
+            setStatusMessage({
+              type: "error",
+              text: `OAuth error: ${msg}`,
+            });
+          } finally {
+            setIsVerifying(false);
+          }
         });
-        try {
-          const accessToken = await exchangeOAuthCode(CLIENT_ID, CLIENT_SECRET, code);
-          await handleVerifyToken(accessToken);
-        } catch (err) {
-          setStatusMessage({
-            type: "error",
-            text: err instanceof Error ? err.message : "Failed to exchange OAuth token",
-          });
-          setIsVerifying(false);
-        }
+
+        unlisten = unsub;
+      } catch (e) {
+        console.error("Could not set up oauth event listener:", e);
       }
-    }).then((unsub) => {
-      unlistenFn = unsub;
-    });
+    };
+
+    setupListener();
 
     return () => {
-      if (unlistenFn) unlistenFn();
+      if (unlisten) unlisten();
     };
-  }, []);
+  }, [isOpen]);
 
-  if (!isOpen) return null;
-
-  const handleStartOAuth = async () => {
+  const handleOAuthLogin = () => {
     if (!CLIENT_ID) {
-      setStatusMessage({ type: "error", text: "Client ID not found in .env" });
+      setStatusMessage({
+        type: "error",
+        text: "OAuth Client ID is missing. Add VITE_CLICKUP_CLIENT_ID to .env",
+      });
       return;
     }
-    const redirectUri = encodeURIComponent(REDIRECT_URI);
-    const authUrl = `https://app.clickup.com/api?client_id=${CLIENT_ID}&redirect_uri=${redirectUri}`;
 
+    const authUrl = `https://app.clickup.com/api?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(
+      REDIRECT_URI,
+    )}`;
+
+    openExternalUrl(authUrl);
     setStatusMessage({
       type: "success",
-      text: "Opening ClickUp in your browser...",
+      text: "Opening ClickUp authentication in your browser...",
     });
+  };
 
-    // Native browser launch via macOS 'open'
-    await openExternalUrl(authUrl);
+  const handlePersonalTokenSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!personalTokenInput.trim()) {
+      setStatusMessage({
+        type: "error",
+        text: "Please enter your personal API token.",
+      });
+      return;
+    }
+
+    handleVerifyToken(personalTokenInput.trim());
   };
 
   const handleDisconnect = () => {
     setToken(null);
-    setUser(null);
-    useAppStore.setState({
-      activeTimer: null,
-      elapsedSeconds: 0,
-      todayLoggedSeconds: 0,
-    });
+    setPersonalTokenInput("");
     clearTrayTitle();
-    setStatusMessage({ type: "success", text: "Logged out" });
+    setStatusMessage({
+      type: "success",
+      text: "Disconnected from ClickUp workspace.",
+    });
   };
 
   const handleTestNotification = async () => {
@@ -233,141 +278,160 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setNotificationStatus(null);
     try {
       const ok = await notify(
-        "ClickUp Lite",
-        "Notifications are active! Break and Pomodoro alerts will show here.",
+        "ClickUp Lite Notifications",
+        "Notifications are active! You will get alerts for timer finishes and due tasks.",
       );
       if (ok) {
         setNotificationStatus({
           type: "success",
-          text: "Notification triggered! macOS suppresses banners if the app window is focused—switch apps or check Notification Center.",
+          text: "Notification triggered successfully! Check your macOS Notification Center.",
         });
       } else {
         setNotificationStatus({
           type: "error",
-          text: "Notification permission was not granted. Please check macOS System Settings > Notifications.",
+          text: "Notification delivery returned false. Ensure macOS System Settings > Notifications allows alerts for this app.",
         });
       }
-    } catch (err) {
+    } catch (e: unknown) {
+      const err = e as Error;
       setNotificationStatus({
         type: "error",
-        text: err instanceof Error ? err.message : "Failed to trigger notification",
+        text: `Notification test error: ${err.message || String(e)}`,
       });
     } finally {
       setIsTestingNotification(false);
     }
   };
 
+  if (!isOpen) return null;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3">
-      <div className="flex flex-col w-full max-w-sm max-h-[540px] rounded-xl border border-border bg-card shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+      <div className="flex h-full max-h-[520px] w-full max-w-[360px] flex-col rounded-xl border border-border bg-card shadow-2xl text-card-foreground animate-in fade-in zoom-in-95 duration-150">
         {/* Modal Header */}
-        <div className="flex items-center justify-between border-b border-border/80 px-3.5 py-2.5 bg-muted/30 shrink-0">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+        <div className="flex items-center justify-between border-b border-border/80 px-3 py-2.5">
+          <div className="flex items-center gap-1.5 font-semibold text-xs text-foreground">
             <Key className="h-3.5 w-3.5 text-primary" />
-            <span>Settings & Preferences</span>
+            <span>ClickUp Preferences</span>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="flex h-5 w-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           >
-            <X className="h-3 w-3" />
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="flex flex-col gap-3.5 p-3.5 text-xs overflow-y-auto">
-          {/* Method Selector */}
-          <div className="flex rounded-lg border border-border bg-muted/40 p-0.5">
+        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3.5 text-xs">
+          {/* Status Alert Banner */}
+          {statusMessage && (
+            <div
+              className={`flex items-start gap-2 rounded-lg p-2.5 text-xs ${
+                statusMessage.type === "success"
+                  ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                  : "bg-destructive/15 text-destructive border border-destructive/20"
+              }`}
+            >
+              {statusMessage.type === "success" ? (
+                <CheckCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              ) : (
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              )}
+              <span className="leading-tight">{statusMessage.text}</span>
+            </div>
+          )}
+
+          {/* Authentication Mode Tabs */}
+          <div className="flex rounded-lg bg-muted p-0.5 border border-border/60">
             <button
               type="button"
               onClick={() => setAuthMethod("oauth")}
-              className={`flex-1 rounded-md py-1 text-center font-medium transition-colors cursor-pointer ${
+              className={`flex-1 py-1 text-center font-medium rounded-md transition-all cursor-pointer ${
                 authMethod === "oauth"
-                  ? "bg-background text-foreground shadow-xs"
+                  ? "bg-card text-foreground shadow-xs font-semibold"
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              OAuth 2.0 (Recommended)
+              OAuth 2.0 (Browser)
             </button>
             <button
               type="button"
               onClick={() => setAuthMethod("token")}
-              className={`flex-1 rounded-md py-1 text-center font-medium transition-colors cursor-pointer ${
+              className={`flex-1 py-1 text-center font-medium rounded-md transition-all cursor-pointer ${
                 authMethod === "token"
-                  ? "bg-background text-foreground shadow-xs"
+                  ? "bg-card text-foreground shadow-xs font-semibold"
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Personal API Key
+              Personal Token
             </button>
           </div>
 
+          {/* OAuth Tab Panel */}
           {authMethod === "oauth" ? (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2.5 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+              <p className="text-[11px] text-muted-foreground leading-normal">
+                Authorize ClickUp directly through your browser. Once approved, the desktop app
+                automatically captures your session.
+              </p>
               <Button
-                size="sm"
+                type="button"
+                onClick={handleOAuthLogin}
                 disabled={isVerifying}
-                onClick={handleStartOAuth}
-                className="w-full gap-1.5 rounded-lg bg-primary hover:bg-primary text-primary-foreground cursor-pointer"
+                className="w-full flex items-center justify-center gap-1.5 cursor-pointer h-8 text-xs font-semibold"
               >
                 {isVerifying ? (
-                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  <>
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    <span>Connecting to ClickUp...</span>
+                  </>
                 ) : (
-                  <ExternalLink className="h-3 w-3" />
+                  <>
+                    <ExternalLink className="h-3 w-3" />
+                    <span>Authorize with ClickUp</span>
+                  </>
                 )}
-                <span>{isVerifying ? "Exchanging token..." : "Connect with ClickUp"}</span>
               </Button>
             </div>
           ) : (
-            <div className="flex flex-col gap-2">
-              <p className="text-[11px] text-muted-foreground leading-relaxed">
-                Direct personal token from ClickUp Settings ➔ Apps ➔ API Token (`pk_...`).
-              </p>
+            /* Personal Token Tab Panel */
+            <form
+              onSubmit={handlePersonalTokenSubmit}
+              className="flex flex-col gap-2.5 rounded-lg border border-border/80 bg-muted/20 p-2.5"
+            >
               <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-medium text-muted-foreground uppercase">
-                  Personal Token
+                <label
+                  htmlFor="personal-token-input"
+                  className="text-[11px] font-medium text-foreground"
+                >
+                  ClickUp API Key (pk_...)
                 </label>
                 <input
+                  id="personal-token-input"
                   type="password"
                   value={personalTokenInput}
                   onChange={(e) => setPersonalTokenInput(e.target.value)}
-                  placeholder="pk_..."
-                  className="h-8 rounded-md border border-border bg-background px-2 text-xs focus:border-primary focus:outline-none"
+                  placeholder="pk_1234567_ABC..."
+                  className="h-8 rounded-md border border-border bg-background px-2 text-xs font-mono text-foreground focus:border-foreground focus:outline-none"
                 />
               </div>
               <Button
-                size="sm"
+                type="submit"
                 disabled={isVerifying || !personalTokenInput.trim()}
-                onClick={() => handleVerifyToken(personalTokenInput.trim())}
-                className="mt-1 w-full gap-1.5 rounded-lg bg-primary hover:bg-primary/90 text-primary-foreground cursor-pointer"
+                className="w-full flex items-center justify-center gap-1.5 cursor-pointer h-8 text-xs font-semibold"
               >
                 {isVerifying ? (
-                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  <>
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    <span>Validating Key...</span>
+                  </>
                 ) : (
-                  <CheckCircle className="h-3 w-3" />
+                  <span>Save and Connect</span>
                 )}
-                <span>{isVerifying ? "Verifying..." : "Save & Verify Token"}</span>
               </Button>
-            </div>
-          )}
-
-          {/* Status Message */}
-          {statusMessage && (
-            <div
-              className={`flex items-center gap-1.5 rounded-md p-2 text-[11px] ${
-                statusMessage.type === "success"
-                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                  : "bg-destructive/10 text-destructive border border-destructive/20"
-              }`}
-            >
-              {statusMessage.type === "success" ? (
-                <CheckCircle className="h-3.5 w-3.5 shrink-0" />
-              ) : (
-                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-              )}
-              <span>{statusMessage.text}</span>
-            </div>
+            </form>
           )}
 
           {/* Currently Logged In Indicator */}
@@ -467,8 +531,35 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
           </div>
 
-          {/* System & Launch Settings */}
+          {/* Window & Launch Behavior */}
           <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            {/* Pin Window Toggle */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-medium text-foreground">
+                <Pin
+                  className={`h-3.5 w-3.5 ${isPinned ? "text-primary fill-current -rotate-45" : "text-muted-foreground"}`}
+                />
+                <span>Pin Window</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPinned(!isPinned)}
+                className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                  isPinned
+                    ? "bg-primary/15 text-primary font-medium"
+                    : "bg-muted text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {isPinned ? "Pinned (Stay Open)" : "Auto-Hide"}
+              </button>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-tight">
+              Keep the control panel open and floating even when clicking on other applications.
+            </p>
+
+            <div className="h-px bg-border/60 my-0.5" />
+
+            {/* Launch at Login */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 font-medium text-foreground">
                 <Rocket className="h-3.5 w-3.5 text-indigo-500" />
@@ -524,73 +615,73 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 font-medium text-foreground">
-                <Bell className="h-3.5 w-3.5 text-amber-500" />
-                <span>Desktop Notifications</span>
+                {notificationsEnabled ? (
+                  <Bell className="h-3.5 w-3.5 text-primary" />
+                ) : (
+                  <BellOff className="h-3.5 w-3.5 text-muted-foreground" />
+                )}
+                <span>Notifications & Sound</span>
               </div>
               <button
                 type="button"
                 onClick={() => setNotificationsEnabled(!notificationsEnabled)}
                 className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-colors ${
                   notificationsEnabled
-                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-medium"
+                    ? "bg-primary/15 text-primary font-medium"
                     : "bg-muted text-muted-foreground"
                 }`}
               >
-                {notificationsEnabled ? (
-                  <>
-                    <Bell className="h-3 w-3" /> Enabled
-                  </>
-                ) : (
-                  <>
-                    <BellOff className="h-3 w-3" /> Muted
-                  </>
-                )}
+                {notificationsEnabled ? "Enabled" : "Disabled"}
               </button>
             </div>
-
             <p className="text-[11px] text-muted-foreground leading-tight">
-              Used for {pomodoroDurationMinutes}m Pomodoro breaks and 2-hour continuous work alerts.
+              Receive native notifications when timers finish, Pomodoro intervals trigger, or tasks
+              are due soon.
             </p>
-
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={isTestingNotification}
-              onClick={handleTestNotification}
-              className="mt-1 w-full gap-1.5 text-xs cursor-pointer border-dashed"
-            >
-              {isTestingNotification ? (
-                <RefreshCw className="h-3 w-3 animate-spin" />
-              ) : (
-                <Bell className="h-3 w-3 text-primary" />
-              )}
-              <span>Send Test Desktop Notification</span>
-            </Button>
-
-            {notificationStatus && (
-              <div
-                className={`rounded-md p-2 text-[10.5px] leading-relaxed flex items-start gap-1.5 ${
-                  notificationStatus.type === "success"
-                    ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20"
-                    : "bg-destructive/10 text-destructive border border-destructive/20"
-                }`}
-              >
-                {notificationStatus.type === "success" ? (
-                  <CheckCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                ) : (
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+            {notificationsEnabled && isTauri() && (
+              <div className="flex flex-col gap-1.5 pt-1 border-t border-border/40">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-muted-foreground">
+                    Test notification delivery
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isTestingNotification}
+                    onClick={handleTestNotification}
+                    className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-muted hover:bg-accent text-foreground transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {isTestingNotification ? (
+                      <>
+                        <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                        <span>Sending...</span>
+                      </>
+                    ) : (
+                      <span>Send Test Alert</span>
+                    )}
+                  </button>
+                </div>
+                {notificationStatus && (
+                  <p
+                    className={`text-[10px] leading-tight ${
+                      notificationStatus.type === "success"
+                        ? "text-emerald-500"
+                        : "text-destructive"
+                    }`}
+                  >
+                    {notificationStatus.text}
+                  </p>
                 )}
-                <span>{notificationStatus.text}</span>
               </div>
             )}
+          </div>
 
-            <div className="flex items-start gap-1 text-[10px] text-muted-foreground/80 mt-1">
-              <Info className="h-3 w-3 shrink-0 mt-0.5" />
-              <span>
-                <strong>ClickUp Note:</strong> ClickUp's public API does not provide a notifications
-                or inbox endpoint. Workspace events require webhooks or active timers.
-              </span>
-            </div>
+          {/* Helper / Info Note */}
+          <div className="flex items-start gap-1.5 rounded-lg border border-border/60 bg-muted/40 p-2 text-[10px] text-muted-foreground">
+            <Info className="h-3.5 w-3.5 shrink-0 mt-0.2 text-muted-foreground/80" />
+            <span className="leading-tight">
+              ClickUp tokens are stored locally on your device in secure storage and never sent to
+              third parties.
+            </span>
           </div>
         </div>
       </div>

@@ -1,6 +1,6 @@
-import { useTheme } from "@/components/theme-provider";
+import { useTheme } from "./theme-provider";
 import { useAppStore } from "../store/useAppStore";
-import { Moon, RefreshCw, Settings, Sun, X } from "lucide-react";
+import { Moon, Pin, RefreshCw, Settings, Sun, X } from "lucide-react";
 
 interface ControlPanelHeaderProps {
   onOpenSettings: () => void;
@@ -18,6 +18,8 @@ export function ControlPanelHeader({
   const user = useAppStore((s) => s.user);
   const teamName = useAppStore((s) => s.teamName);
   const token = useAppStore((s) => s.token);
+  const isPinned = useAppStore((s) => s.isPinned);
+  const setIsPinned = useAppStore((s) => s.setIsPinned);
   const storeSyncAll = useAppStore((s) => s.syncAll);
   const isLoadingTasks = useAppStore((s) => s.isLoadingTasks);
   const { theme, setTheme } = useTheme();
@@ -103,6 +105,19 @@ export function ControlPanelHeader({
             <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin text-primary" : ""}`} />
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={() => setIsPinned(!isPinned)}
+          title={isPinned ? "Unpin Window (Auto-hide on blur)" : "Pin Window (Keep open on blur)"}
+          className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors ${
+            isPinned
+              ? "bg-primary/15 text-primary hover:bg-primary/25 font-semibold"
+              : "text-muted-foreground hover:bg-accent hover:text-foreground"
+          }`}
+        >
+          <Pin className={`h-3.5 w-3.5 ${isPinned ? "fill-current -rotate-45" : ""}`} />
+        </button>
 
         <button
           type="button"

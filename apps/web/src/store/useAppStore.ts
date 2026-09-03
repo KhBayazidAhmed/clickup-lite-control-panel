@@ -211,7 +211,7 @@ export const useAppStore = create<AppState>()(
           todayLoggedSeconds: updatedToday,
         });
 
-        setTrayTitle(`▶ 00:00`);
+        setTrayTitle(`00:00`);
 
         if (token && teamId) {
           try {
@@ -266,7 +266,7 @@ export const useAppStore = create<AppState>()(
         });
 
         const timeStr = formatTime(activeTimer.accumulatedSeconds || 0);
-        setTrayTitle(`▶ ${timeStr}`);
+        setTrayTitle(`${timeStr}`);
 
         if (token && teamId) {
           try {
@@ -396,7 +396,7 @@ export const useAppStore = create<AppState>()(
 
           // Update menu bar title
           const timeStr = formatTime(currentElapsed);
-          setTrayTitle(`▶ ${timeStr}`);
+          setTrayTitle(`${timeStr}`);
 
           // Long session reminder at 2 hours
           if (currentElapsed === 7200 && notificationsEnabled) {
@@ -454,7 +454,7 @@ export const useAppStore = create<AppState>()(
                 elapsedSeconds: elapsed,
               });
 
-              setTrayTitle(`▶ ${formatTime(elapsed)}`);
+              setTrayTitle(`${formatTime(elapsed)}`);
             } else {
               // No running timer returned from ClickUp
               const current = get().activeTimer;
@@ -896,7 +896,7 @@ export const useAppStore = create<AppState>()(
                 (state.activeTimer.accumulatedSeconds || 0) +
                 Math.max(0, Math.floor((Date.now() - state.activeTimer.startTime) / 1000));
               state.elapsedSeconds = elapsed;
-              setTrayTitle(`▶ ${formatTime(elapsed)}`);
+              setTrayTitle(`${formatTime(elapsed)}`);
             } else {
               state.elapsedSeconds = state.activeTimer.accumulatedSeconds || 0;
               setTrayTitle("⏸ Paused");
