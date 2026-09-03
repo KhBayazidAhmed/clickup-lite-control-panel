@@ -28,6 +28,8 @@
     "check-types": "turbo run check-types",
     "dev:web": "turbo run dev -F web --",
     "dev:desktop": "bun --filter web desktop:dev",
+    "desktop:build": "bun --filter web desktop:build",
+    "icons:generate": "python3 ./scripts/generate-icons.py",
     "check": "oxlint && oxfmt --write",
     "prepare": "husky"
   },
