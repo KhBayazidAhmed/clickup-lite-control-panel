@@ -6,6 +6,14 @@ import { defineConfig } from "vite";
 export default defineConfig({
   server: {
     port: 3001,
+    proxy: {
+      "/clickup-api": {
+        target: "https://api.clickup.com",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/clickup-api/, ""),
+      },
+    },
   },
   resolve: {
     tsconfigPaths: true,
