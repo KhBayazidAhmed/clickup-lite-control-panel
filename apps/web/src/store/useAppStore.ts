@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { ClickUpClient, ClickUpTask, ClickUpUser } from "../lib/clickup";
+import { ClickUpClient, ClickUpList, ClickUpTask, ClickUpUser } from "../lib/clickup";
 import { notify, setTrayTitle, clearTrayTitle, setNativePinned } from "../lib/native";
 
 export interface ActiveTimer {
@@ -49,7 +49,11 @@ interface AppState {
   isPinned: boolean;
   activeTab: "active" | "due" | "all";
 
-  // Tasks
+  // Lists & Tasks
+  availableLists: ClickUpList[];
+  selectedListId: string | null;
+  isLoadingLists: boolean;
+  isCreatingTask: boolean;
   tasks: ClickUpTask[];
   isLoadingTasks: boolean;
   lastTaskPollTime: number | null;
@@ -60,6 +64,7 @@ interface AppState {
   setTeam: (id: string, name: string) => void;
   setIsPinned: (pinned: boolean) => void;
   setActiveTab: (tab: "active" | "due" | "all") => void;
+  setSelectedListId: (listId: string | null) => void;
   setNotificationsEnabled: (enabled: boolean) => void;
   setDailyGoalHours: (hours: number) => void;
   setPomodoroDurationMinutes: (minutes: number) => void;
@@ -74,11 +79,19 @@ interface AppState {
   syncTodayTime: () => Promise<void>;
   syncAll: () => Promise<void>;
 
-  // Task Actions
+  // List & Task Actions
+  fetchLists: () => Promise<ClickUpList[]>;
   fetchTasks: () => Promise<void>;
   pollTaskUpdates: () => Promise<void>;
+  createTask: (params: {
+    name: string;
+    listId?: string;
+    priority?: number;
+    dueDate?: number;
+    description?: string;
+  }) => Promise<ClickUpTask>;
+  quickAddTask: (name: string, listId?: string, priority?: number) => Promise<ClickUpTask | void>;
   updateTaskStatus: (taskId: string, status: string) => Promise<void>;
-  quickAddTask: (name: string) => Promise<void>;
 
   // Pomodoro Actions
   togglePomodoro: () => void;
@@ -98,6 +111,7 @@ function formatTime(seconds: number): string {
 let syncTimerPromise: Promise<void> | null = null;
 let syncTodayPromise: Promise<void> | null = null;
 let fetchTasksPromise: Promise<void> | null = null;
+let fetchListsPromise: Promise<ClickUpList[]> | null = null;
 let pollTasksPromise: Promise<void> | null = null;
 let flushOfflinePromise: Promise<void> | null = null;
 let taskBaselineEstablished = false;
@@ -127,6 +141,10 @@ export const useAppStore = create<AppState>()(
       isPinned: false,
       activeTab: "active",
 
+      availableLists: [],
+      selectedListId: null,
+      isLoadingLists: false,
+      isCreatingTask: false,
       tasks: [],
       isLoadingTasks: false,
       lastTaskPollTime: null,
@@ -135,7 +153,15 @@ export const useAppStore = create<AppState>()(
         if (!token) {
           taskBaselineEstablished = false;
           notifiedDueMap.clear();
-          set({ token: null, user: null, teamId: null, teamName: null, tasks: [] });
+          set({
+            token: null,
+            user: null,
+            teamId: null,
+            teamName: null,
+            tasks: [],
+            availableLists: [],
+            selectedListId: null,
+          });
         } else {
           set({ token });
         }
@@ -147,6 +173,7 @@ export const useAppStore = create<AppState>()(
         setNativePinned(isPinned);
       },
       setActiveTab: (activeTab) => set({ activeTab }),
+      setSelectedListId: (selectedListId) => set({ selectedListId }),
       setNotificationsEnabled: (notificationsEnabled) => set({ notificationsEnabled }),
       setDailyGoalHours: (dailyGoalHours) =>
         set({
@@ -497,6 +524,58 @@ export const useAppStore = create<AppState>()(
         return syncTodayPromise;
       },
 
+      fetchLists: async () => {
+        const { token, teamId } = get();
+        if (!token || !teamId) return [];
+
+        if (fetchListsPromise) {
+          return fetchListsPromise;
+        }
+
+        set({ isLoadingLists: true });
+
+        fetchListsPromise = (async () => {
+          try {
+            const client = new ClickUpClient(token);
+            const lists = await client.getLists(teamId);
+
+            set((state) => {
+              const listMap = new Map<string, ClickUpList>();
+              // Keep any previously discovered lists
+              for (const l of state.availableLists) {
+                listMap.set(l.id, l);
+              }
+              for (const l of lists) {
+                listMap.set(l.id, l);
+              }
+
+              const merged = Array.from(listMap.values());
+              const currentSelected = state.selectedListId;
+              const selectedListId =
+                currentSelected && listMap.has(currentSelected)
+                  ? currentSelected
+                  : merged[0]?.id || null;
+
+              return {
+                availableLists: merged,
+                selectedListId,
+                isLoadingLists: false,
+              };
+            });
+
+            return lists;
+          } catch (err) {
+            console.warn("Failed to fetch lists from ClickUp:", err);
+            set({ isLoadingLists: false });
+            return [];
+          } finally {
+            fetchListsPromise = null;
+          }
+        })();
+
+        return fetchListsPromise;
+      },
+
       syncAll: async () => {
         const { token, teamId } = get();
         if (!token || !teamId) return;
@@ -506,6 +585,7 @@ export const useAppStore = create<AppState>()(
           await Promise.allSettled([
             get().flushOfflineQueue(),
             get().fetchTasks(),
+            get().fetchLists(),
             get().syncCurrentTimer(),
             get().syncTodayTime(),
           ]);
@@ -529,7 +609,40 @@ export const useAppStore = create<AppState>()(
             const client = new ClickUpClient(token);
             const tasks = await client.getTasks(teamId, user?.id);
             taskBaselineEstablished = true;
-            set({ tasks, isLoadingTasks: false, lastTaskPollTime: Date.now() });
+
+            // Automatically register lists discovered from tasks
+            const listsFromTasks: ClickUpList[] = [];
+            for (const t of tasks) {
+              if (t.list && t.list.id && t.list.name) {
+                listsFromTasks.push({
+                  id: t.list.id,
+                  name: t.list.name,
+                });
+              }
+            }
+
+            set((state) => {
+              const listMap = new Map<string, ClickUpList>();
+              for (const l of state.availableLists) {
+                listMap.set(l.id, l);
+              }
+              for (const l of listsFromTasks) {
+                if (!listMap.has(l.id)) {
+                  listMap.set(l.id, l);
+                }
+              }
+
+              const mergedLists = Array.from(listMap.values());
+              const selectedListId = state.selectedListId || mergedLists[0]?.id || null;
+
+              return {
+                tasks,
+                availableLists: mergedLists,
+                selectedListId,
+                isLoadingTasks: false,
+                lastTaskPollTime: Date.now(),
+              };
+            });
           } catch (err) {
             console.error("Failed to fetch tasks:", err);
             set({ isLoadingTasks: false });
@@ -609,6 +722,100 @@ export const useAppStore = create<AppState>()(
         return pollTasksPromise;
       },
 
+      createTask: async ({ name, listId, priority, dueDate, description }) => {
+        const { token, teamId, user, selectedListId, availableLists, tasks } = get();
+
+        // If offline / no token connected, save locally
+        if (!token || !teamId) {
+          const newTask: ClickUpTask = {
+            id: `local-${Date.now()}`,
+            name,
+            status: { status: "to do", color: "#9ca3af", type: "open", orderindex: 0 },
+            priority: priority
+              ? {
+                  priority:
+                    priority === 1
+                      ? "urgent"
+                      : priority === 2
+                        ? "high"
+                        : priority === 3
+                          ? "normal"
+                          : "low",
+                  color:
+                    priority === 1
+                      ? "#f43f5e"
+                      : priority === 2
+                        ? "#f59e0b"
+                        : priority === 3
+                          ? "#0ea5e9"
+                          : "#9ca3af",
+                }
+              : null,
+            list: { id: "local", name: "Local Tasks" },
+          };
+          set((state) => ({ tasks: [newTask, ...state.tasks] }));
+          return newTask;
+        }
+
+        set({ isCreatingTask: true });
+        try {
+          const client = new ClickUpClient(token);
+
+          // Find target list
+          let targetListId = listId || selectedListId;
+
+          if (!targetListId) {
+            if (availableLists.length > 0 && availableLists[0]) {
+              targetListId = availableLists[0].id;
+            } else if (tasks.length > 0 && tasks[0]?.list?.id) {
+              targetListId = tasks[0].list.id;
+            } else {
+              // Try to fetch lists on the fly
+              const lists = await get().fetchLists();
+              if (lists.length > 0 && lists[0]) {
+                targetListId = lists[0].id;
+              }
+            }
+          }
+
+          if (!targetListId) {
+            throw new Error(
+              "No ClickUp list found in this workspace. Please create a list in ClickUp first.",
+            );
+          }
+
+          const created = await client.createTask(targetListId, {
+            name,
+            description,
+            assignees: user?.id ? [user.id] : undefined,
+            priority,
+            dueDate,
+          });
+
+          // Ensure task has list metadata if missing from raw response
+          const targetListObj = availableLists.find((l) => l.id === targetListId);
+          const fullTask: ClickUpTask = {
+            ...created,
+            list:
+              created.list ||
+              (targetListObj ? { id: targetListObj.id, name: targetListObj.name } : undefined),
+          };
+
+          set((state) => ({
+            tasks: [fullTask, ...state.tasks.filter((t) => t.id !== fullTask.id)],
+            selectedListId: targetListId,
+          }));
+
+          return fullTask;
+        } finally {
+          set({ isCreatingTask: false });
+        }
+      },
+
+      quickAddTask: async (name, listId, priority) => {
+        return await get().createTask({ name, listId, priority });
+      },
+
       updateTaskStatus: async (taskId, newStatus) => {
         const { token, tasks } = get();
 
@@ -618,7 +825,7 @@ export const useAppStore = create<AppState>()(
         );
         set({ tasks: updated });
 
-        if (token) {
+        if (token && !taskId.startsWith("local-") && !taskId.startsWith("demo-")) {
           try {
             const client = new ClickUpClient(token);
             await client.updateTaskStatus(taskId, newStatus);
@@ -626,18 +833,6 @@ export const useAppStore = create<AppState>()(
             console.error("Failed to update status on ClickUp:", err);
           }
         }
-      },
-
-      quickAddTask: async (name) => {
-        const { tasks } = get();
-        const newTask: ClickUpTask = {
-          id: `task-${Date.now()}`,
-          name,
-          status: { status: "to do", color: "#9ca3af", type: "open", orderindex: 0 },
-          priority: { priority: "normal", color: "#10b981" },
-          list: { id: "quick", name: "Quick Tasks" },
-        };
-        set({ tasks: [newTask, ...tasks] });
       },
 
       togglePomodoro: () => {
@@ -664,6 +859,8 @@ export const useAppStore = create<AppState>()(
         todayLoggedSeconds: state.todayLoggedSeconds,
         offlineTimeQueue: state.offlineTimeQueue || [],
         tasks: (state.tasks || []).filter((t) => !t.id.startsWith("demo-")),
+        availableLists: state.availableLists || [],
+        selectedListId: state.selectedListId,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
@@ -675,6 +872,11 @@ export const useAppStore = create<AppState>()(
           // Ensure offlineTimeQueue is initialized as array
           if (!Array.isArray(state.offlineTimeQueue)) {
             state.offlineTimeQueue = [];
+          }
+
+          // Ensure availableLists is initialized as array
+          if (!Array.isArray(state.availableLists)) {
+            state.availableLists = [];
           }
 
           // Clean up any legacy demo tasks
