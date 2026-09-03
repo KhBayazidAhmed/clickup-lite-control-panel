@@ -17,10 +17,12 @@ function HomeComponent() {
   const syncAll = useAppStore((s) => s.syncAll);
   const syncCurrentTimer = useAppStore((s) => s.syncCurrentTimer);
   const syncTodayTime = useAppStore((s) => s.syncTodayTime);
+  const pollTaskUpdates = useAppStore((s) => s.pollTaskUpdates);
   const token = useAppStore((s) => s.token);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTaskPollRef = useRef<number>(0);
 
   // Global 1-second interval for active timer ticking & Pomodoro
   useEffect(() => {
@@ -34,12 +36,13 @@ function HomeComponent() {
   useEffect(() => {
     if (token) {
       syncAll();
+      lastTaskPollRef.current = Date.now();
     }
   }, [token, syncAll]);
 
   // Adaptive background polling:
-  // When visible: poll current timer & today's time every 15s
-  // When hidden: poll only active timer at relaxed 45s interval to save battery and API quota
+  // Timer & today's hours: every 15s (visible) / 45s (hidden)
+  // Smart Task & Notification polling: every 60s (visible) / 120s (hidden)
   useEffect(() => {
     if (!token) return;
 
@@ -55,6 +58,14 @@ function HomeComponent() {
         if (!document.hidden) {
           syncTodayTime();
         }
+
+        // Smart polling check for task updates and due-soon notifications
+        const now = Date.now();
+        const taskPollIntervalMs = document.hidden ? 120000 : 60000;
+        if (now - lastTaskPollRef.current >= taskPollIntervalMs) {
+          lastTaskPollRef.current = now;
+          pollTaskUpdates();
+        }
       }, intervalMs);
     };
 
@@ -67,7 +78,7 @@ function HomeComponent() {
       clearInterval(timerId);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [token, syncCurrentTimer, syncTodayTime]);
+  }, [token, syncCurrentTimer, syncTodayTime, pollTaskUpdates]);
 
   // Debounced wakeup: immediately refresh elapsed digits locally, debounce network sync
   const handleWakeup = useCallback(() => {
@@ -81,8 +92,12 @@ function HomeComponent() {
     debounceTimerRef.current = setTimeout(() => {
       syncCurrentTimer();
       syncTodayTime();
+      if (Date.now() - lastTaskPollRef.current >= 45000) {
+        lastTaskPollRef.current = Date.now();
+        pollTaskUpdates();
+      }
     }, 300);
-  }, [tick, token, syncCurrentTimer, syncTodayTime]);
+  }, [tick, token, syncCurrentTimer, syncTodayTime, pollTaskUpdates]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -118,9 +133,6 @@ function HomeComponent() {
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("focus", onWindowFocus);
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-      }
       if (unlistenTauriFocus) {
         unlistenTauriFocus();
       }
@@ -128,23 +140,23 @@ function HomeComponent() {
   }, [handleWakeup]);
 
   return (
-    <div className="flex h-full w-full flex-col bg-background/95 backdrop-blur-xl border border-border/80 rounded-xl overflow-hidden shadow-2xl">
-      {/* Native Control Panel Header */}
+    <div className="flex h-screen w-full flex-col bg-background font-sans text-foreground select-none overflow-hidden antialiased">
+      {/* Dynamic Header */}
       <ControlPanelHeader onOpenSettings={() => setIsSettingsOpen(true)} />
 
-      {/* Main Panel Content Area */}
-      <div className="flex flex-1 flex-col gap-3 p-3 overflow-hidden">
-        {/* Time Tracking Widget */}
+      {/* Main Content Area */}
+      <div className="flex flex-1 flex-col gap-2.5 overflow-hidden p-3">
+        {/* Active Timer Card */}
         <TimerCard />
 
-        {/* Task Management Widget */}
+        {/* Compact Task List with Tabs & Quick Add */}
         <TaskList />
       </div>
 
       {/* Pomodoro & Notifications Footer */}
       <PomodoroFooter />
 
-      {/* ClickUp OAuth / Settings Modal */}
+      {/* Settings Modal */}
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );
