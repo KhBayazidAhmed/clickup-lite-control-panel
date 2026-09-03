@@ -27,6 +27,7 @@
     "build": "turbo run build",
     "check-types": "turbo run check-types",
     "dev:web": "turbo run dev -F web --",
+    "dev:desktop": "bun --filter web desktop:dev",
     "check": "oxlint && oxfmt --write",
     "prepare": "husky"
   },
