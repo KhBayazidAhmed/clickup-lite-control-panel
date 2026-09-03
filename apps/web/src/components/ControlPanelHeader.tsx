@@ -1,12 +1,12 @@
 import { useTheme } from "@/components/theme-provider";
-import { useAppStore } from "@/store";
+import { useAppStore } from "../store/useAppStore";
 import { Moon, RefreshCw, Settings, Sun, X } from "lucide-react";
 
 interface ControlPanelHeaderProps {
   onOpenSettings: () => void;
-  onClose: () => void;
-  onSync: () => void;
-  isSyncing: boolean;
+  onClose?: () => void;
+  onSync?: () => void;
+  isSyncing?: boolean;
 }
 
 export function ControlPanelHeader({
@@ -18,7 +18,24 @@ export function ControlPanelHeader({
   const user = useAppStore((s) => s.user);
   const teamName = useAppStore((s) => s.teamName);
   const token = useAppStore((s) => s.token);
+  const storeSyncAll = useAppStore((s) => s.syncAll);
+  const isLoadingTasks = useAppStore((s) => s.isLoadingTasks);
   const { theme, setTheme } = useTheme();
+
+  const handleSync = onSync || storeSyncAll;
+  const syncing = isSyncing !== undefined ? isSyncing : isLoadingTasks;
+
+  const handleClose = () => {
+    if (onClose) {
+      onClose();
+    } else {
+      import("@tauri-apps/api/webviewWindow")
+        .then(({ getCurrentWebviewWindow }) => {
+          getCurrentWebviewWindow().hide();
+        })
+        .catch(() => {});
+    }
+  };
 
   return (
     <div
@@ -31,7 +48,7 @@ export function ControlPanelHeader({
           <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
             <defs>
               <linearGradient id="headerCuChevron" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#FF007A" />
+                <stop offset="0%" stopColor="#FF007F" />
                 <stop offset="100%" stopColor="#7B68EE" />
               </linearGradient>
             </defs>
@@ -78,12 +95,12 @@ export function ControlPanelHeader({
         {token && (
           <button
             type="button"
-            onClick={onSync}
-            disabled={isSyncing}
+            onClick={handleSync}
+            disabled={syncing}
             title="Sync Tasks"
             className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin text-primary" : ""}`} />
+            <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin text-primary" : ""}`} />
           </button>
         )}
 
@@ -109,7 +126,7 @@ export function ControlPanelHeader({
 
         <button
           type="button"
-          onClick={onClose}
+          onClick={handleClose}
           title="Hide Window"
           className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
         >
