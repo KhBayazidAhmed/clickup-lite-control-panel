@@ -39,6 +39,7 @@ interface AppState {
   // Tasks
   tasks: ClickUpTask[];
   isLoadingTasks: boolean;
+  lastTaskPollTime: number | null;
 
   // Actions
   setToken: (token: string | null) => void;
@@ -60,6 +61,7 @@ interface AppState {
 
   // Task Actions
   fetchTasks: () => Promise<void>;
+  pollTaskUpdates: () => Promise<void>;
   updateTaskStatus: (taskId: string, status: string) => Promise<void>;
   quickAddTask: (name: string) => Promise<void>;
 
@@ -101,10 +103,13 @@ function formatTime(seconds: number): string {
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
 }
 
-// In-flight request deduplication promises
+// In-flight request deduplication promises & polling state
 let syncTimerPromise: Promise<void> | null = null;
 let syncTodayPromise: Promise<void> | null = null;
 let fetchTasksPromise: Promise<void> | null = null;
+let pollTasksPromise: Promise<void> | null = null;
+let taskBaselineEstablished = false;
+const notifiedDueMap = new Map<string, number>();
 
 export const useAppStore = create<AppState>()(
   persist(
@@ -130,8 +135,15 @@ export const useAppStore = create<AppState>()(
 
       tasks: INITIAL_DEMO_TASKS,
       isLoadingTasks: false,
+      lastTaskPollTime: null,
 
-      setToken: (token) => set({ token }),
+      setToken: (token) => {
+        if (!token) {
+          taskBaselineEstablished = false;
+          notifiedDueMap.clear();
+        }
+        set({ token });
+      },
       setUser: (user) => set({ user }),
       setTeam: (id, name) => set({ teamId: id, teamName: name }),
       setIsPinned: (isPinned) => set({ isPinned }),
@@ -148,42 +160,28 @@ export const useAppStore = create<AppState>()(
         }
 
         const now = Date.now();
-        const newTimer: ActiveTimer = {
-          taskId,
-          taskName,
-          startTime: now,
-          accumulatedSeconds: 0,
-          isRunning: true,
-        };
-
         set({
-          activeTimer: newTimer,
+          activeTimer: {
+            taskId,
+            taskName,
+            startTime: now,
+            accumulatedSeconds: 0,
+            isRunning: true,
+          },
           elapsedSeconds: 0,
           todayLoggedSeconds: updatedToday,
         });
 
-        const formatted = "▶ 00:00";
-        setTrayTitle(formatted);
+        setTrayTitle(`▶ 00:00`);
 
-        // Sync with ClickUp if authenticated
         if (token && teamId) {
           try {
             const client = new ClickUpClient(token);
             const entry = await client.startTimeEntry(teamId, taskId, taskName);
-            if (entry?.id) {
-              const startTimestamp = entry.start ? Number(entry.start) : now;
-              const actualElapsed = Math.max(0, Math.floor((Date.now() - startTimestamp) / 1000));
+            if (entry) {
               set((state) => ({
-                activeTimer: state.activeTimer
-                  ? {
-                      ...state.activeTimer,
-                      entryId: entry.id,
-                      startTime: startTimestamp,
-                    }
-                  : null,
-                elapsedSeconds: actualElapsed,
+                activeTimer: state.activeTimer ? { ...state.activeTimer, entryId: entry.id } : null,
               }));
-              setTrayTitle(`▶ ${formatTime(actualElapsed)}`);
             }
           } catch (err) {
             console.warn("ClickUp API sync error on startTimer:", err);
@@ -192,31 +190,23 @@ export const useAppStore = create<AppState>()(
       },
 
       pauseTimer: async () => {
-        const { activeTimer, token, teamId } = get();
-        if (!activeTimer) return;
-
-        // Compute current elapsed time before pausing
-        const currentElapsed =
-          (activeTimer.accumulatedSeconds || 0) +
-          (activeTimer.isRunning
-            ? Math.max(0, Math.floor((Date.now() - activeTimer.startTime) / 1000))
-            : 0);
+        const { activeTimer, elapsedSeconds, token, teamId } = get();
+        if (!activeTimer || !activeTimer.isRunning) return;
 
         set({
           activeTimer: {
             ...activeTimer,
-            accumulatedSeconds: currentElapsed,
             isRunning: false,
+            accumulatedSeconds: elapsedSeconds,
           },
-          elapsedSeconds: currentElapsed,
         });
+
         setTrayTitle("⏸ Paused");
 
         if (token && teamId) {
           try {
             const client = new ClickUpClient(token);
             await client.stopTimeEntry(teamId);
-            await get().syncTodayTime();
           } catch (err) {
             console.warn("ClickUp API sync error on pauseTimer:", err);
           }
@@ -225,7 +215,7 @@ export const useAppStore = create<AppState>()(
 
       resumeTimer: async () => {
         const { activeTimer, token, teamId } = get();
-        if (!activeTimer) return;
+        if (!activeTimer || activeTimer.isRunning) return;
 
         const now = Date.now();
         set({
@@ -236,8 +226,8 @@ export const useAppStore = create<AppState>()(
           },
         });
 
-        const currentElapsed = activeTimer.accumulatedSeconds || 0;
-        setTrayTitle(`▶ ${formatTime(currentElapsed)}`);
+        const timeStr = formatTime(activeTimer.accumulatedSeconds || 0);
+        setTrayTitle(`▶ ${timeStr}`);
 
         if (token && teamId) {
           try {
@@ -247,12 +237,10 @@ export const useAppStore = create<AppState>()(
               activeTimer.taskId,
               activeTimer.taskName,
             );
-            if (entry?.id) {
-              set((state) =>
-                state.activeTimer
-                  ? { activeTimer: { ...state.activeTimer, entryId: entry.id } }
-                  : {},
-              );
+            if (entry) {
+              set((state) => ({
+                activeTimer: state.activeTimer ? { ...state.activeTimer, entryId: entry.id } : null,
+              }));
             }
           } catch (err) {
             console.warn("ClickUp API sync error on resumeTimer:", err);
@@ -261,18 +249,17 @@ export const useAppStore = create<AppState>()(
       },
 
       stopTimer: async () => {
-        const { token, teamId, activeTimer, elapsedSeconds, todayLoggedSeconds } = get();
+        const { activeTimer, elapsedSeconds, todayLoggedSeconds, token, teamId } = get();
         if (!activeTimer) return;
 
         set({
-          todayLoggedSeconds: todayLoggedSeconds + elapsedSeconds,
           activeTimer: null,
+          todayLoggedSeconds: todayLoggedSeconds + elapsedSeconds,
           elapsedSeconds: 0,
         });
 
         clearTrayTitle();
 
-        // Sync stop with ClickUp if authenticated
         if (token && teamId) {
           try {
             const client = new ClickUpClient(token);
@@ -456,7 +443,8 @@ export const useAppStore = create<AppState>()(
           try {
             const client = new ClickUpClient(token);
             const tasks = await client.getTasks(teamId, user?.id);
-            set({ tasks, isLoadingTasks: false });
+            taskBaselineEstablished = true;
+            set({ tasks, isLoadingTasks: false, lastTaskPollTime: Date.now() });
           } catch (err) {
             console.error("Failed to fetch tasks:", err);
             set({ isLoadingTasks: false });
@@ -466,6 +454,74 @@ export const useAppStore = create<AppState>()(
         })();
 
         return fetchTasksPromise;
+      },
+
+      pollTaskUpdates: async () => {
+        const { token, teamId, user, tasks: currentTasks, notificationsEnabled } = get();
+        if (!token || !teamId) return;
+
+        if (pollTasksPromise) {
+          return pollTasksPromise;
+        }
+
+        pollTasksPromise = (async () => {
+          try {
+            const client = new ClickUpClient(token);
+            const freshTasks = await client.getTasks(teamId, user?.id);
+            const now = Date.now();
+
+            // Establish baseline on first run without spamming alerts
+            if (!taskBaselineEstablished) {
+              taskBaselineEstablished = true;
+              set({ tasks: freshTasks, lastTaskPollTime: now });
+              return;
+            }
+
+            if (notificationsEnabled) {
+              const currentTaskMap = new Map(currentTasks.map((t) => [t.id, t]));
+
+              for (const fresh of freshTasks) {
+                const existing = currentTaskMap.get(fresh.id);
+
+                // 1. New task assigned to user
+                if (!existing) {
+                  const listInfo = fresh.list?.name ? ` in ${fresh.list.name}` : "";
+                  notify("New Task Assigned", `"${fresh.name}"${listInfo}`);
+                }
+                // 2. Task status changed
+                else if (
+                  existing.status?.status?.toLowerCase() !== fresh.status?.status?.toLowerCase()
+                ) {
+                  notify(
+                    "Task Status Updated",
+                    `"${fresh.name}" is now ${(fresh.status?.status || "updated").toUpperCase()}`,
+                  );
+                }
+
+                // 3. Due Soon Reminder (within next 30 minutes)
+                if (fresh.due_date) {
+                  const dueMs = Number(fresh.due_date);
+                  const diffMinutes = Math.floor((dueMs - now) / 60000);
+                  if (diffMinutes > 0 && diffMinutes <= 30) {
+                    const lastNotifiedDue = notifiedDueMap.get(fresh.id);
+                    if (lastNotifiedDue !== dueMs) {
+                      notifiedDueMap.set(fresh.id, dueMs);
+                      notify("Task Due Soon", `"${fresh.name}" is due in ${diffMinutes}m`);
+                    }
+                  }
+                }
+              }
+            }
+
+            set({ tasks: freshTasks, lastTaskPollTime: now });
+          } catch (err) {
+            console.warn("Failed to poll task updates from ClickUp:", err);
+          } finally {
+            pollTasksPromise = null;
+          }
+        })();
+
+        return pollTasksPromise;
       },
 
       updateTaskStatus: async (taskId, newStatus) => {
