@@ -2,15 +2,15 @@
 """
 ClickUp Lite Icon Generator
 Generates:
-1. Master macOS App Icon (1024x1024 squircle with subtle drop shadow)
+1. Master macOS App Icon (1024x1024 Light Minimalist squircle with drop shadow)
 2. Tauri multi-resolution icon bundle (ICNS, ICO, PNGs)
-3. Dedicated macOS Menu Bar Tray Template icons (crisp vector-like silhouette)
+3. Dedicated macOS Menu Bar Tray Template icons (crisp vector silhouette)
 4. Public web favicons (favicon.ico, favicon.png, apple-touch-icon.png)
 """
 
 import os
 import subprocess
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TAURI_ICONS_DIR = os.path.join(PROJECT_ROOT, "apps", "web", "src-tauri", "icons")
@@ -19,6 +19,58 @@ MASTER_ICON = os.path.join(PROJECT_ROOT, "apps", "web", "src-tauri", "app-icon.p
 
 os.makedirs(TAURI_ICONS_DIR, exist_ok=True)
 os.makedirs(PUBLIC_DIR, exist_ok=True)
+
+LIGHT_MINIMALIST_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <filter id="dropShadow" x="-10%" y="-5%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#000000" flood-opacity="0.28" />
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.15" />
+    </filter>
+
+    <linearGradient id="chevronGradLight" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stopColor="#FF007F" />
+      <stop offset="100%" stopColor="#7B68EE" />
+    </linearGradient>
+
+    <linearGradient id="arcGradLight" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stopColor="#00E5FF" />
+      <stop offset="100%" stopColor="#00B0FF" />
+    </linearGradient>
+
+    <linearGradient id="bgLight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stopColor="#FFFFFF" />
+      <stop offset="100%" stopColor="#F1F3F8" />
+    </linearGradient>
+  </defs>
+
+  <!-- Shadow & Main White Squircle Tile -->
+  <rect x="100" y="92" width="824" height="824" rx="185" fill="url(#bgLight)" filter="url(#dropShadow)" />
+
+  <!-- Crisp Outer & Inner Subtle Borders -->
+  <rect x="100" y="92" width="824" height="824" rx="185" fill="none" stroke="#E2E8F0" stroke-width="3" />
+  <rect x="102" y="94" width="820" height="820" rx="183" fill="none" stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="2" />
+
+  <!-- Centered ClickUp Logo -->
+  <g transform="translate(272, 264) scale(20)">
+    <path fill="url(#chevronGradLight)" d="M12.04 6.15l-6.568 5.66-3.036-3.52L12.055 0l9.543 8.296-3.05 3.509z"/>
+    <path fill="url(#arcGradLight)" d="M2 18.439l3.69-2.828c1.961 2.56 4.044 3.739 6.363 3.739 2.307 0 4.33-1.166 6.203-3.704L22 18.405C19.298 22.065 15.941 24 12.053 24C8.178 24 4.788 22.078 2 18.439z"/>
+  </g>
+</svg>"""
+
+def generate_master_icon():
+    print("Generating master 1024x1024 Light Minimalist icon...")
+    tmp_svg = "/tmp/clickup_master.svg"
+    with open(tmp_svg, "w") as f:
+        f.write(LIGHT_MINIMALIST_SVG)
+    subprocess.run([
+        "/opt/homebrew/bin/rsvg-convert",
+        "-w", "1024",
+        "-h", "1024",
+        "-f", "png",
+        "-o", MASTER_ICON,
+        tmp_svg
+    ], check=True)
+    print("  ✓ app-icon.png (1024x1024)")
 
 def generate_tray_icons():
     print("Generating macOS menu bar tray template icons...")
@@ -79,6 +131,7 @@ def generate_tauri_bundle_icons():
     print("  ✓ Generated ICNS, ICO, and all PNG icon dimensions")
 
 if __name__ == "__main__":
+    generate_master_icon()
     generate_tray_icons()
     generate_web_icons()
     generate_tauri_bundle_icons()
