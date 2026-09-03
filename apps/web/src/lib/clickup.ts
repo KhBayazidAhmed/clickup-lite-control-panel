@@ -14,6 +14,19 @@ export interface ClickUpTeam {
   members: { user: ClickUpUser }[];
 }
 
+export interface ClickUpList {
+  id: string;
+  name: string;
+  space?: {
+    id: string;
+    name: string;
+  };
+  folder?: {
+    id: string;
+    name: string;
+  };
+}
+
 export interface ClickUpTask {
   id: string;
   name: string;
@@ -26,8 +39,8 @@ export interface ClickUpTask {
   priority?: {
     priority: string;
     color: string;
-  };
-  due_date?: string;
+  } | null;
+  due_date?: string | null;
   list?: {
     id: string;
     name: string;
@@ -94,6 +107,68 @@ export class ClickUpClient {
     return data.teams;
   }
 
+  async getLists(teamId: string): Promise<ClickUpList[]> {
+    try {
+      const spacesData = await this.request<{ spaces: { id: string; name: string }[] }>(
+        `/team/${teamId}/space?archived=false`,
+      );
+      const spaces = spacesData.spaces || [];
+      const allLists: ClickUpList[] = [];
+
+      await Promise.all(
+        spaces.map(async (space) => {
+          // 1. Folderless lists directly under space
+          const folderlessPromise = this.request<{ lists: { id: string; name: string }[] }>(
+            `/space/${space.id}/list?archived=false`,
+          )
+            .then((res) => {
+              for (const l of res.lists || []) {
+                allLists.push({
+                  id: l.id,
+                  name: l.name,
+                  space: { id: space.id, name: space.name },
+                });
+              }
+            })
+            .catch((err) => {
+              console.warn(`ClickUp: error fetching folderless lists for space ${space.id}:`, err);
+            });
+
+          // 2. Folders and lists inside folders
+          const folderPromise = this.request<{
+            folders: {
+              id: string;
+              name: string;
+              lists?: { id: string; name: string }[];
+            }[];
+          }>(`/space/${space.id}/folder?archived=false`)
+            .then((res) => {
+              for (const folder of res.folders || []) {
+                for (const l of folder.lists || []) {
+                  allLists.push({
+                    id: l.id,
+                    name: l.name,
+                    folder: { id: folder.id, name: folder.name },
+                    space: { id: space.id, name: space.name },
+                  });
+                }
+              }
+            })
+            .catch((err) => {
+              console.warn(`ClickUp: error fetching folders for space ${space.id}:`, err);
+            });
+
+          await Promise.all([folderlessPromise, folderPromise]);
+        }),
+      );
+
+      return allLists;
+    } catch (err) {
+      console.warn("ClickUp: failed to get workspace lists:", err);
+      return [];
+    }
+  }
+
   async getTasks(teamId: string, assigneeId?: number): Promise<ClickUpTask[]> {
     let url = `/team/${teamId}/task?subtasks=true&include_closed=false`;
     if (assigneeId) {
@@ -101,6 +176,38 @@ export class ClickUpClient {
     }
     const data = await this.request<{ tasks: ClickUpTask[] }>(url);
     return data.tasks || [];
+  }
+
+  async createTask(
+    listId: string,
+    data: {
+      name: string;
+      description?: string;
+      assignees?: number[];
+      priority?: number;
+      dueDate?: number;
+    },
+  ): Promise<ClickUpTask> {
+    const body: Record<string, unknown> = {
+      name: data.name,
+    };
+    if (data.description) {
+      body.description = data.description;
+    }
+    if (data.assignees && data.assignees.length > 0) {
+      body.assignees = data.assignees;
+    }
+    if (data.priority !== undefined) {
+      body.priority = data.priority;
+    }
+    if (data.dueDate !== undefined) {
+      body.due_date = data.dueDate;
+    }
+
+    return await this.request<ClickUpTask>(`/list/${listId}/task`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   }
 
   async updateTaskStatus(taskId: string, status: string): Promise<void> {
@@ -159,7 +266,8 @@ export class ClickUpClient {
         taskId &&
         !taskId.startsWith("demo-") &&
         taskId !== "general" &&
-        !taskId.startsWith("task-");
+        !taskId.startsWith("task-") &&
+        !taskId.startsWith("local-");
       const body: Record<string, unknown> = {
         description: description || "",
         billable: false,
@@ -205,7 +313,8 @@ export class ClickUpClient {
       entry.taskId &&
       !entry.taskId.startsWith("demo-") &&
       entry.taskId !== "general" &&
-      !entry.taskId.startsWith("task-");
+      !entry.taskId.startsWith("task-") &&
+      !entry.taskId.startsWith("local-");
 
     const body: Record<string, unknown> = {
       start: entry.start,
