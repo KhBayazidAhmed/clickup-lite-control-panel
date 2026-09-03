@@ -265,7 +265,7 @@ pub fn run() {
             let tray_menu = Menu::with_items(app, &[&show_i, &sync_i, &quit_i])?;
 
             // Create menubar tray icon
-            let icon = app.default_window_icon().cloned().expect("missing default window icon");
+            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png")).expect("missing tray icon");
             let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(icon)
                 .icon_as_template(true)
