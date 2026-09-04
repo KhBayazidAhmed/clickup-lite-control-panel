@@ -27,6 +27,9 @@ interface AppState {
   user: ClickUpUser | null;
   teamId: string | null;
   teamName: string | null;
+  customClientId: string;
+  customClientSecret: string;
+  setCustomOAuthCredentials: (clientId: string, clientSecret: string) => void;
 
   // Timer
   activeTimer: ActiveTimer | null;
@@ -124,6 +127,10 @@ export const useAppStore = create<AppState>()(
       user: null,
       teamId: null,
       teamName: null,
+      customClientId: "",
+      customClientSecret: "",
+      setCustomOAuthCredentials: (customClientId, customClientSecret) =>
+        set({ customClientId, customClientSecret }),
 
       activeTimer: null,
       elapsedSeconds: 0,
@@ -851,6 +858,8 @@ export const useAppStore = create<AppState>()(
         user: state.user,
         teamId: state.teamId,
         teamName: state.teamName,
+        customClientId: state.customClientId || "",
+        customClientSecret: state.customClientSecret || "",
         dailyGoalHours: state.dailyGoalHours,
         pomodoroDurationMinutes: state.pomodoroDurationMinutes,
         isPinned: state.isPinned,

@@ -19,7 +19,6 @@ import {
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
 import {
-  isTauri,
   notify,
   openExternalUrl,
   clearTrayTitle,
@@ -57,10 +56,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setNotificationsEnabled,
     offlineTimeQueue,
     flushOfflineQueue,
+    customClientId,
+    customClientSecret,
+    setCustomOAuthCredentials,
   } = useAppStore();
 
   const [authMethod, setAuthMethod] = useState<"oauth" | "token">("oauth");
   const [personalTokenInput, setPersonalTokenInput] = useState(token || "");
+  const [inputClientId, setInputClientId] = useState(customClientId || CLIENT_ID);
+  const [inputClientSecret, setInputClientSecret] = useState(customClientSecret || CLIENT_SECRET);
+  const [showOAuthInputs, setShowOAuthInputs] = useState(false);
   const [customGoalInput, setCustomGoalInput] = useState(String(dailyGoalHours));
   const [isVerifying, setIsVerifying] = useState(false);
   const [isFlushingOffline, setIsFlushingOffline] = useState(false);
@@ -78,6 +83,20 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   useEffect(() => {
     setCustomGoalInput(String(dailyGoalHours));
   }, [dailyGoalHours]);
+
+  // Keep local inputs in sync with store or env
+  useEffect(() => {
+    if (customClientId) {
+      setInputClientId(customClientId);
+    } else if (CLIENT_ID) {
+      setInputClientId(CLIENT_ID);
+    }
+    if (customClientSecret) {
+      setInputClientSecret(customClientSecret);
+    } else if (CLIENT_SECRET) {
+      setInputClientSecret(CLIENT_SECRET);
+    }
+  }, [customClientId, customClientSecret]);
 
   const handleCustomGoalChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -113,26 +132,32 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   }, [isOpen]);
 
   const handleToggleAutostart = async () => {
-    const next = !autostartEnabled;
-    const ok = await setAutostart(next);
-    if (ok) {
-      setAutostartEnabled(next);
-      setStatusMessage({
-        type: "success",
-        text: next ? "Launch at login enabled" : "Launch at login disabled",
-      });
-    } else {
-      setStatusMessage({
-        type: "error",
-        text: "Failed to update launch at login setting",
-      });
+    try {
+      const newState = !autostartEnabled;
+      const success = await setAutostart(newState);
+      if (success) {
+        setAutostartEnabled(newState);
+      }
+    } catch (e) {
+      console.error("Failed to toggle autostart:", e);
     }
   };
 
-  const handleManualFlushOffline = async () => {
+  const handleFlushOffline = async () => {
+    if (offlineTimeQueue.length === 0) return;
     setIsFlushingOffline(true);
     try {
       await flushOfflineQueue();
+      setStatusMessage({
+        type: "success",
+        text: "Offline queue successfully synced to ClickUp!",
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Sync failed";
+      setStatusMessage({
+        type: "error",
+        text: `Failed to flush offline queue: ${msg}`,
+      });
     } finally {
       setIsFlushingOffline(false);
     }
@@ -187,59 +212,85 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   useEffect(() => {
     if (!isOpen) return;
 
-    let unlisten: (() => void) | undefined;
+    let unlistenCode: (() => void) | undefined;
+    let unlistenReceived: (() => void) | undefined;
+
+    const handleOAuthPayload = async (rawPayload: unknown) => {
+      let code: string | undefined;
+      if (typeof rawPayload === "string") {
+        code = rawPayload;
+      } else if (rawPayload && typeof rawPayload === "object") {
+        code = (rawPayload as { code?: string }).code;
+      }
+      if (!code) return;
+
+      setIsVerifying(true);
+      setStatusMessage(null);
+
+      try {
+        const activeClientId = inputClientId.trim() || customClientId || CLIENT_ID;
+        const activeClientSecret = inputClientSecret.trim() || customClientSecret || CLIENT_SECRET;
+
+        if (!activeClientId || !activeClientSecret) {
+          throw new Error("ClickUp Client ID or Client Secret is missing.");
+        }
+
+        const accessToken = await exchangeOAuthCode(activeClientId, activeClientSecret, code);
+
+        if (accessToken) {
+          await handleVerifyToken(accessToken);
+        } else {
+          throw new Error("Failed to receive access token.");
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "OAuth exchange failed";
+        setStatusMessage({
+          type: "error",
+          text: `OAuth error: ${msg}`,
+        });
+      } finally {
+        setIsVerifying(false);
+      }
+    };
 
     const setupListener = async () => {
       try {
-        const unsub = await listen<{ code: string }>("oauth-code-received", async (event) => {
-          const code = event.payload.code;
-          if (!code) return;
-
-          setIsVerifying(true);
-          setStatusMessage(null);
-
-          try {
-            const accessToken = await exchangeOAuthCode(CLIENT_ID, CLIENT_SECRET, code);
-
-            if (accessToken) {
-              await handleVerifyToken(accessToken);
-            } else {
-              throw new Error("Failed to receive access token.");
-            }
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : "OAuth exchange failed";
-            setStatusMessage({
-              type: "error",
-              text: `OAuth error: ${msg}`,
-            });
-          } finally {
-            setIsVerifying(false);
-          }
+        unlistenCode = await listen<unknown>("oauth-code", (event) => {
+          handleOAuthPayload(event.payload);
         });
-
-        unlisten = unsub;
+        unlistenReceived = await listen<unknown>("oauth-code-received", (event) => {
+          handleOAuthPayload(event.payload);
+        });
       } catch (e) {
-        console.error("Could not set up oauth event listener:", e);
+        console.error("Could not set up oauth event listener in modal:", e);
       }
     };
 
     setupListener();
 
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenCode) unlistenCode();
+      if (unlistenReceived) unlistenReceived();
     };
-  }, [isOpen]);
+  }, [isOpen, inputClientId, inputClientSecret, customClientId, customClientSecret]);
 
   const handleOAuthLogin = () => {
-    if (!CLIENT_ID) {
+    const activeClientId = inputClientId.trim() || customClientId || CLIENT_ID;
+
+    if (!activeClientId) {
+      setShowOAuthInputs(true);
       setStatusMessage({
         type: "error",
-        text: "OAuth Client ID is missing. Add VITE_CLICKUP_CLIENT_ID to .env",
+        text: "OAuth Client ID is missing. Please enter your credentials below.",
       });
       return;
     }
 
-    const authUrl = `https://app.clickup.com/api?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(
+    if (inputClientId.trim() || inputClientSecret.trim()) {
+      setCustomOAuthCredentials(inputClientId.trim(), inputClientSecret.trim());
+    }
+
+    const authUrl = `https://app.clickup.com/api?client_id=${activeClientId}&redirect_uri=${encodeURIComponent(
       REDIRECT_URI,
     )}`;
 
@@ -317,7 +368,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           <button
             type="button"
             onClick={onClose}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -394,6 +445,71 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   </>
                 )}
               </Button>
+
+              {/* Custom OAuth App Credentials Configuration */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowOAuthInputs(!showOAuthInputs)}
+                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 cursor-pointer"
+                >
+                  <span>
+                    {showOAuthInputs
+                      ? "▲ Hide App Credentials"
+                      : "▼ Custom OAuth Credentials (Optional)"}
+                  </span>
+                </button>
+
+                {showOAuthInputs && (
+                  <div className="mt-2 flex flex-col gap-2 rounded-md border border-border bg-background/50 p-2 text-[11px]">
+                    <div>
+                      <label
+                        htmlFor="oauth-client-id"
+                        className="text-[10px] font-medium text-muted-foreground"
+                      >
+                        ClickUp Client ID
+                      </label>
+                      <input
+                        id="oauth-client-id"
+                        type="text"
+                        value={inputClientId}
+                        onChange={(e) => setInputClientId(e.target.value)}
+                        placeholder="e.g. 5PLBHTJ..."
+                        className="mt-0.5 h-7 w-full rounded border border-border bg-background px-2 text-[11px] font-mono text-foreground focus:border-foreground focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="oauth-client-secret"
+                        className="text-[10px] font-medium text-muted-foreground"
+                      >
+                        ClickUp Client Secret
+                      </label>
+                      <input
+                        id="oauth-client-secret"
+                        type="password"
+                        value={inputClientSecret}
+                        onChange={(e) => setInputClientSecret(e.target.value)}
+                        placeholder="e.g. secret_..."
+                        className="mt-0.5 h-7 w-full rounded border border-border bg-background px-2 text-[11px] font-mono text-foreground focus:border-foreground focus:outline-none"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomOAuthCredentials(inputClientId.trim(), inputClientSecret.trim());
+                        setStatusMessage({
+                          type: "success",
+                          text: "Custom OAuth credentials saved.",
+                        });
+                      }}
+                      className="self-end rounded bg-secondary px-2 py-1 text-[10px] font-medium text-secondary-foreground hover:bg-secondary/80 cursor-pointer"
+                    >
+                      Save Credentials
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           ) : (
             /* Personal Token Tab Panel */
@@ -451,139 +567,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
           )}
 
-          {/* Productivity & Focus Goals */}
-          <div className="flex flex-col gap-2.5 rounded-lg border border-border/80 bg-muted/20 p-2.5">
-            <div className="flex items-center gap-1.5 font-medium text-foreground">
-              <Target className="h-3.5 w-3.5 text-primary" />
-              <span>Daily Target & Focus Session</span>
-            </div>
-
-            {/* Daily Goal Hours: Custom Input + Presets */}
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] text-muted-foreground">Daily Work Goal:</span>
-                <div className="flex items-center gap-1">
-                  <div className="relative flex items-center">
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0.5"
-                      max="24"
-                      value={customGoalInput}
-                      onFocus={(e) => e.target.select()}
-                      onChange={handleCustomGoalChange}
-                      onBlur={handleCustomGoalBlur}
-                      placeholder="8"
-                      className="h-6 w-14 rounded-md border border-border bg-background px-1.5 pr-4 text-center text-xs font-semibold text-foreground focus:border-foreground focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                    <span className="pointer-events-none absolute right-1.5 text-[10px] text-muted-foreground">
-                      h
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Presets */}
-              <div className="flex items-center gap-1">
-                {[4, 6, 7.5, 8, 10].map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => {
-                      setDailyGoalHours(item);
-                      setCustomGoalInput(String(item));
-                    }}
-                    className={`flex-1 h-5.5 rounded text-[10px] font-medium transition-colors cursor-pointer ${
-                      dailyGoalHours === item
-                        ? "bg-foreground text-background shadow-xs font-bold"
-                        : "bg-muted text-muted-foreground hover:text-foreground"
-                    }`}
-                    title={item === 7.5 ? "7 hours 30 minutes" : `${item} hours`}
-                  >
-                    {item}h
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Pomodoro Duration */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                <Timer className="h-3 w-3 text-amber-500" />
-                <span>Pomodoro Focus:</span>
-              </div>
-              <div className="flex items-center gap-1">
-                {[15, 20, 25, 30, 45].map((mins) => (
-                  <button
-                    key={mins}
-                    type="button"
-                    onClick={() => setPomodoroDurationMinutes(mins)}
-                    className={`h-6 rounded px-1.5 text-[10.5px] font-medium transition-colors cursor-pointer ${
-                      pomodoroDurationMinutes === mins
-                        ? "bg-amber-500 text-white shadow-xs font-semibold"
-                        : "bg-muted text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {mins}m
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Window & Launch Behavior */}
-          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
-            {/* Pin Window Toggle */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 font-medium text-foreground">
-                <Pin
-                  className={`h-3.5 w-3.5 ${isPinned ? "text-primary fill-current -rotate-45" : "text-muted-foreground"}`}
-                />
-                <span>Pin Window</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsPinned(!isPinned)}
-                className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-colors ${
-                  isPinned
-                    ? "bg-primary/15 text-primary font-medium"
-                    : "bg-muted text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {isPinned ? "Pinned (Stay Open)" : "Auto-Hide"}
-              </button>
-            </div>
-            <p className="text-[11px] text-muted-foreground leading-tight">
-              Keep the control panel open and floating even when clicking on other applications.
-            </p>
-
-            <div className="h-px bg-border/60 my-0.5" />
-
-            {/* Launch at Login */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 font-medium text-foreground">
-                <Rocket className="h-3.5 w-3.5 text-indigo-500" />
-                <span>Launch at Login</span>
-              </div>
-              <button
-                type="button"
-                onClick={handleToggleAutostart}
-                className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-colors ${
-                  autostartEnabled
-                    ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 font-medium"
-                    : "bg-muted text-muted-foreground"
-                }`}
-              >
-                {autostartEnabled ? "Enabled" : "Disabled"}
-              </button>
-            </div>
-            <p className="text-[11px] text-muted-foreground leading-tight">
-              Automatically launch ClickUp Lite in your macOS menu bar upon system startup.
-            </p>
-          </div>
-
-          {/* Offline Sync Queue Section */}
-          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+          {/* Offline Sync Queue Manager */}
+          <div className="rounded-lg border border-border/80 bg-muted/20 p-2.5 flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 font-medium text-foreground">
                 {offlineTimeQueue.length > 0 ? (
@@ -591,96 +576,203 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 ) : (
                   <CloudCheck className="h-3.5 w-3.5 text-emerald-500" />
                 )}
-                <span>Offline Storage & Sync</span>
+                <span>Offline Time Queue</span>
               </div>
-              {offlineTimeQueue.length > 0 && (
-                <button
-                  type="button"
-                  disabled={isFlushingOffline}
-                  onClick={handleManualFlushOffline}
-                  className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium hover:bg-amber-500/25 cursor-pointer disabled:opacity-50"
-                >
-                  {isFlushingOffline ? "Syncing..." : "Sync Now"}
-                </button>
-              )}
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
+                {offlineTimeQueue.length} pending
+              </span>
             </div>
-            <p className="text-[11px] text-muted-foreground leading-tight">
+            <p className="text-[10px] text-muted-foreground leading-normal">
               {offlineTimeQueue.length > 0
-                ? `${offlineTimeQueue.length} session(s) pending sync to ClickUp. Will auto-upload when internet reconnects.`
-                : "All timer sessions are synced to ClickUp. Safe to track time offline anytime."}
+                ? "Time tracked while disconnected is held here safely and flushed automatically."
+                : "All time tracking entries are fully synced with ClickUp servers."}
             </p>
+            {offlineTimeQueue.length > 0 && (
+              <Button
+                type="button"
+                onClick={handleFlushOffline}
+                disabled={isFlushingOffline || !token}
+                className="h-7 text-xs font-medium w-full flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className={`h-3 w-3 ${isFlushingOffline ? "animate-spin" : ""}`} />
+                <span>{isFlushingOffline ? "Syncing..." : "Sync Offline Queue Now"}</span>
+              </Button>
+            )}
           </div>
 
-          {/* Notification Diagnostics & Settings */}
+          {/* App Preferences */}
+          <div className="flex flex-col gap-3 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <span className="font-medium text-foreground text-[11px]">Panel Behavior</span>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Pin className="h-3.5 w-3.5 text-muted-foreground" />
+                <div className="flex flex-col">
+                  <span>Keep Window Pinned</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    Prevent auto-hiding when clicking away
+                  </span>
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={isPinned}
+                onChange={(e) => setIsPinned(e.target.checked)}
+                className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Rocket className="h-3.5 w-3.5 text-muted-foreground" />
+                <div className="flex flex-col">
+                  <span>Launch at Login</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    Start in menubar when your Mac boots
+                  </span>
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={autostartEnabled}
+                onChange={handleToggleAutostart}
+                className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+              />
+            </div>
+          </div>
+
+          {/* Daily Goal Configuration */}
+          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <div className="flex items-center gap-1.5 font-medium text-foreground">
+              <Target className="h-3.5 w-3.5 text-muted-foreground" />
+              <span>Daily Target Hours</span>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Set your target tracked hours per day for the progress bar.
+            </p>
+            <div className="flex items-center gap-2 mt-1">
+              <div className="flex items-center gap-1">
+                {[6, 7.5, 8, 9].map((hrs) => (
+                  <button
+                    key={hrs}
+                    type="button"
+                    onClick={() => {
+                      setDailyGoalHours(hrs);
+                      setCustomGoalInput(String(hrs));
+                    }}
+                    className={`px-2 py-0.5 rounded text-[10px] font-semibold border cursor-pointer transition-colors ${
+                      dailyGoalHours === hrs
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-background border-border text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {hrs}h
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1 ml-auto">
+                <input
+                  type="number"
+                  step="0.5"
+                  min="0.5"
+                  max="24"
+                  value={customGoalInput}
+                  onChange={handleCustomGoalChange}
+                  onBlur={handleCustomGoalBlur}
+                  className="h-6 w-12 rounded border border-border bg-background px-1 text-center font-mono text-xs text-foreground focus:border-foreground focus:outline-none"
+                />
+                <span className="text-[10px] text-muted-foreground">hrs</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Pomodoro Duration Settings */}
+          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <div className="flex items-center gap-1.5 font-medium text-foreground">
+              <Timer className="h-3.5 w-3.5 text-muted-foreground" />
+              <span>Pomodoro Duration</span>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Configure focus session interval in minutes.
+            </p>
+            <div className="flex items-center gap-1.5 mt-1">
+              {[15, 25, 45, 60].map((mins) => (
+                <button
+                  key={mins}
+                  type="button"
+                  onClick={() => setPomodoroDurationMinutes(mins)}
+                  className={`flex-1 py-1 rounded text-[10px] font-semibold border cursor-pointer transition-colors ${
+                    pomodoroDurationMinutes === mins
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "bg-background border-border text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {mins}m
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Notification System Controls */}
           <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 font-medium text-foreground">
+              <div className="flex items-center gap-2">
                 {notificationsEnabled ? (
                   <Bell className="h-3.5 w-3.5 text-primary" />
                 ) : (
                   <BellOff className="h-3.5 w-3.5 text-muted-foreground" />
                 )}
-                <span>Notifications & Sound</span>
+                <div className="flex flex-col">
+                  <span className="font-medium text-foreground">Native Notifications</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    Alerts for timer completions and due tasks
+                  </span>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setNotificationsEnabled(!notificationsEnabled)}
-                className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded cursor-pointer transition-colors ${
-                  notificationsEnabled
-                    ? "bg-primary/15 text-primary font-medium"
-                    : "bg-muted text-muted-foreground"
-                }`}
-              >
-                {notificationsEnabled ? "Enabled" : "Disabled"}
-              </button>
+              <input
+                type="checkbox"
+                checked={notificationsEnabled}
+                onChange={(e) => setNotificationsEnabled(e.target.checked)}
+                className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+              />
             </div>
-            <p className="text-[11px] text-muted-foreground leading-tight">
-              Receive native notifications when timers finish, Pomodoro intervals trigger, or tasks
-              are due soon.
-            </p>
-            {notificationsEnabled && isTauri() && (
-              <div className="flex flex-col gap-1.5 pt-1 border-t border-border/40">
+
+            {/* Test Notification Button */}
+            {notificationsEnabled && (
+              <div className="flex flex-col gap-1.5 pt-1 border-t border-border/50 mt-1">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-muted-foreground">
-                    Test notification delivery
+                    Verify notification delivery:
                   </span>
                   <button
                     type="button"
-                    disabled={isTestingNotification}
                     onClick={handleTestNotification}
-                    className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-muted hover:bg-accent text-foreground transition-colors cursor-pointer disabled:opacity-50"
+                    disabled={isTestingNotification}
+                    className="text-[10px] font-medium text-primary hover:underline cursor-pointer disabled:opacity-50"
                   >
-                    {isTestingNotification ? (
-                      <>
-                        <RefreshCw className="h-2.5 w-2.5 animate-spin" />
-                        <span>Sending...</span>
-                      </>
-                    ) : (
-                      <span>Send Test Alert</span>
-                    )}
+                    {isTestingNotification ? "Sending..." : "Send Test Alert"}
                   </button>
                 </div>
                 {notificationStatus && (
-                  <p
-                    className={`text-[10px] leading-tight ${
+                  <div
+                    className={`rounded p-1.5 text-[10px] leading-tight ${
                       notificationStatus.type === "success"
-                        ? "text-emerald-500"
-                        : "text-destructive"
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        : "bg-destructive/10 text-destructive"
                     }`}
                   >
                     {notificationStatus.text}
-                  </p>
+                  </div>
                 )}
               </div>
             )}
           </div>
 
-          {/* Helper / Info Note */}
-          <div className="flex items-start gap-1.5 rounded-lg border border-border/60 bg-muted/40 p-2 text-[10px] text-muted-foreground">
-            <Info className="h-3.5 w-3.5 shrink-0 mt-0.2 text-muted-foreground/80" />
-            <span className="leading-tight">
-              ClickUp tokens are stored locally on your device in secure storage and never sent to
-              third parties.
+          {/* Information Notice */}
+          <div className="flex items-start gap-1.5 text-[10px] text-muted-foreground leading-normal px-1">
+            <Info className="h-3 w-3 shrink-0 mt-0.5" />
+            <span>
+              Credentials and active timers are securely persisted locally on your device.
             </span>
           </div>
         </div>

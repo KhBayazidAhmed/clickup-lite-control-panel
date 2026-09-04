@@ -6,7 +6,8 @@ import { TimerCard } from "../components/TimerCard";
 import { TaskList } from "../components/TaskList";
 import { PomodoroFooter } from "../components/PomodoroFooter";
 import { SettingsModal } from "../components/SettingsModal";
-import { isTauri } from "../lib/native";
+import { isTauri, notify } from "../lib/native";
+import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
 
 export const Route = createFileRoute("/")({
   component: HomeComponent,
@@ -19,10 +20,14 @@ function HomeComponent() {
   const syncTodayTime = useAppStore((s) => s.syncTodayTime);
   const pollTaskUpdates = useAppStore((s) => s.pollTaskUpdates);
   const token = useAppStore((s) => s.token);
+  const setToken = useAppStore((s) => s.setToken);
+  const setUser = useAppStore((s) => s.setUser);
+  const setTeam = useAppStore((s) => s.setTeam);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTaskPollRef = useRef<number>(0);
+  const lastProcessedCodeRef = useRef<string>("");
 
   // Global 1-second interval for active timer ticking & Pomodoro
   useEffect(() => {
@@ -99,6 +104,7 @@ function HomeComponent() {
     }, 300);
   }, [tick, token, syncCurrentTimer, syncTodayTime, pollTaskUpdates]);
 
+  // Global listeners for window focus, tray sync, and OAuth code callback
   useEffect(() => {
     const onVisibilityChange = () => {
       if (!document.hidden) {
@@ -114,6 +120,8 @@ function HomeComponent() {
 
     let unlistenTauriFocus: (() => void) | undefined;
     let unlistenTraySync: (() => void) | undefined;
+    let unlistenOAuthCode: (() => void) | undefined;
+    let unlistenOAuthCodeReceived: (() => void) | undefined;
 
     if (isTauri()) {
       import("@tauri-apps/api/webviewWindow")
@@ -133,10 +141,73 @@ function HomeComponent() {
 
       import("@tauri-apps/api/event")
         .then(({ listen }) => {
+          // Listen for right-click tray sync
           listen("tray-sync-requested", () => {
             syncAll();
           }).then((unsub) => {
             unlistenTraySync = unsub;
+          });
+
+          // Global OAuth handler: captures code even if modal is closed or window blurs
+          const handleGlobalOAuth = async (rawPayload: unknown) => {
+            let code: string | undefined;
+            if (typeof rawPayload === "string") {
+              code = rawPayload;
+            } else if (rawPayload && typeof rawPayload === "object") {
+              code = (rawPayload as { code?: string }).code;
+            }
+
+            if (!code || code === lastProcessedCodeRef.current) return;
+            lastProcessedCodeRef.current = code;
+
+            const store = useAppStore.getState();
+            const clientId =
+              store.customClientId || (import.meta.env.VITE_CLICKUP_CLIENT_ID as string) || "";
+            const clientSecret =
+              store.customClientSecret ||
+              (import.meta.env.VITE_CLICKUP_CLIENT_SECRET as string) ||
+              "";
+
+            if (!clientId || !clientSecret) {
+              console.warn(
+                "OAuth authorization code received, but Client ID or Secret is missing.",
+              );
+              return;
+            }
+
+            try {
+              const accessToken = await exchangeOAuthCode(clientId, clientSecret, code);
+              if (accessToken) {
+                const client = new ClickUpClient(accessToken);
+                const user = await client.getCurrentUser();
+                const teams = await client.getTeams();
+
+                setToken(accessToken);
+                setUser(user);
+                if (teams?.[0]) {
+                  setTeam(teams[0].id, teams[0].name);
+                }
+
+                notify("Connected to ClickUp", `Logged in as ${user.username || "User"}`);
+                setTimeout(() => {
+                  syncAll();
+                }, 400);
+              }
+            } catch (err) {
+              console.error("Global OAuth code handling failed:", err);
+            }
+          };
+
+          listen<unknown>("oauth-code", (event) => {
+            handleGlobalOAuth(event.payload);
+          }).then((unsub) => {
+            unlistenOAuthCode = unsub;
+          });
+
+          listen<unknown>("oauth-code-received", (event) => {
+            handleGlobalOAuth(event.payload);
+          }).then((unsub) => {
+            unlistenOAuthCodeReceived = unsub;
           });
         })
         .catch(() => {});
@@ -151,8 +222,14 @@ function HomeComponent() {
       if (unlistenTraySync) {
         unlistenTraySync();
       }
+      if (unlistenOAuthCode) {
+        unlistenOAuthCode();
+      }
+      if (unlistenOAuthCodeReceived) {
+        unlistenOAuthCodeReceived();
+      }
     };
-  }, [handleWakeup, syncAll]);
+  }, [handleWakeup, syncAll, setToken, setUser, setTeam]);
 
   return (
     <div className="flex h-screen w-full flex-col bg-background font-sans text-foreground select-none overflow-hidden antialiased">

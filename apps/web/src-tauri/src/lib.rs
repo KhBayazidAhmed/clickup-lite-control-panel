@@ -107,8 +107,7 @@ fn extract_code_from_request(req: &str) -> Option<String> {
     let path = first_line.split_whitespace().nth(1)?;
     let query = path.split('?').nth(1)?;
     for param in query.split('&') {
-        let mut parts = param.split('=');
-        if let (Some(key), Some(val)) = (parts.next(), parts.next()) {
+        if let Some((key, val)) = param.split_once('=') {
             if key == "code" {
                 return Some(val.to_string());
             }
@@ -118,6 +117,9 @@ fn extract_code_from_request(req: &str) -> Option<String> {
 }
 
 fn handle_stream(mut stream: std::net::TcpStream, app_handle: &AppHandle) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
     let mut buffer = [0; 4096];
     let bytes_read = match stream.read(&mut buffer) {
         Ok(n) => n,
@@ -168,9 +170,12 @@ fn handle_stream(mut stream: std::net::TcpStream, app_handle: &AppHandle) {
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
 
-        let _ = app_handle.emit("oauth-code", code);
+        // Emit both event names and both payload formats for complete client compatibility
+        let _ = app_handle.emit("oauth-code", code.clone());
+        let _ = app_handle.emit("oauth-code-received", serde_json::json!({ "code": code }));
 
         if let Some(window) = app_handle.get_webview_window("main") {
+            let _ = window.move_window(Position::TrayCenter);
             let _ = window.show();
             let _ = window.set_focus();
         }
@@ -199,11 +204,19 @@ fn start_oauth_listener(app_handle: AppHandle) {
     // 1. Listen on IPv4 (127.0.0.1:3456)
     let app_ipv4 = app_handle.clone();
     thread::spawn(move || {
-        if let Ok(listener) = TcpListener::bind("127.0.0.1:3456") {
-            for stream in listener.incoming() {
-                if let Ok(stream) = stream {
-                    handle_stream(stream, &app_ipv4);
+        match TcpListener::bind("127.0.0.1:3456") {
+            Ok(listener) => {
+                for stream in listener.incoming() {
+                    if let Ok(stream) = stream {
+                        let app = app_ipv4.clone();
+                        thread::spawn(move || {
+                            handle_stream(stream, &app);
+                        });
+                    }
                 }
+            }
+            Err(e) => {
+                eprintln!("Failed to bind IPv4 OAuth listener on 127.0.0.1:3456: {}", e);
             }
         }
     });
@@ -214,7 +227,10 @@ fn start_oauth_listener(app_handle: AppHandle) {
         if let Ok(listener) = TcpListener::bind("[::1]:3456") {
             for stream in listener.incoming() {
                 if let Ok(stream) = stream {
-                    handle_stream(stream, &app_ipv6);
+                    let app = app_ipv6.clone();
+                    thread::spawn(move || {
+                        handle_stream(stream, &app);
+                    });
                 }
             }
         }
@@ -224,6 +240,7 @@ fn start_oauth_listener(app_handle: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let http_client = reqwest::Client::builder()
+        .user_agent("ClickUpLite/1.0 (Macintosh; Intel Mac OS X)")
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .pool_idle_timeout(Some(Duration::from_secs(90)))
         .build()

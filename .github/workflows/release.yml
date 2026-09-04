@@ -1,0 +1,170 @@
+name: "Release"
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: false
+        type: string
+      draft:
+        description: "Keep as draft release instead of publishing"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  create-draft:
+    name: "Create Draft Release"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+      tag_name: ${{ steps.get-tag.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine tag name
+        id: get-tag
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION=$(node -e "console.log(require('./apps/web/src-tauri/tauri.conf.json').version)")
+            TAG="v${VERSION}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or resolve draft release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = "${{ steps.get-tag.outputs.tag }}";
+            let release;
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag,
+              });
+              release = existing.data;
+            } catch (e) {
+              const created = await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                target_commitish: context.sha,
+                name: `ClickUp Lite ${tag}`,
+                body: `## ClickUp Lite ${tag}\n\nDesktop menubar companion for ClickUp.\n\n### Downloads\n- **macOS**: \`.dmg\` (Universal - Apple Silicon & Intel)\n- **Windows**: \`.exe\` (NSIS Installer) / \`.msi\` (WiX Installer)\n\n### SHA256 Checksums & Assets\nSee attached release artifacts below.`,
+                draft: true,
+                prerelease: false,
+              });
+              release = created.data;
+            }
+            return release.id;
+
+  build-tauri:
+    name: ${{ matrix.name }}
+    needs: create-draft
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+            name: "Build macOS (Universal)"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            args: "--target universal-apple-darwin"
+          - platform: "windows-latest"
+            name: "Build Windows (x64)"
+            rust_targets: "x86_64-pc-windows-msvc"
+            args: "--target x86_64-pc-windows-msvc"
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/web/src-tauri -> target"
+
+      - name: Prepare environment file
+        shell: bash
+        env:
+          VITE_CLICKUP_CLIENT_ID: ${{ secrets.VITE_CLICKUP_CLIENT_ID }}
+          VITE_CLICKUP_CLIENT_SECRET: ${{ secrets.VITE_CLICKUP_CLIENT_SECRET }}
+          VITE_CLICKUP_REDIRECT_URI: ${{ secrets.VITE_CLICKUP_REDIRECT_URI || 'http://localhost:3456/callback' }}
+        run: |
+          if [ -n "${VITE_CLICKUP_CLIENT_ID}" ]; then
+            echo "VITE_CLICKUP_CLIENT_ID=${VITE_CLICKUP_CLIENT_ID}" >> .env
+            echo "VITE_CLICKUP_CLIENT_SECRET=${VITE_CLICKUP_CLIENT_SECRET}" >> .env
+            echo "VITE_CLICKUP_REDIRECT_URI=${VITE_CLICKUP_REDIRECT_URI}" >> .env
+            cp .env apps/web/.env
+          fi
+
+      - name: Install dependencies
+        env:
+          HUSKY: "0"
+        run: bun install --frozen-lockfile
+
+      - name: Build and Upload with Tauri Action
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: "apps/web"
+          tauriScript: "bun tauri"
+          releaseId: ${{ needs.create-draft.outputs.release_id }}
+          tagName: ${{ needs.create-draft.outputs.tag_name }}
+          releaseDraft: true
+          args: ${{ matrix.args }}
+
+  publish-release:
+    name: "Publish Release"
+    needs: [create-draft, build-tauri]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish draft release
+        if: ${{ inputs.draft != true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.create-draft.outputs.tag_name }}
+        run: |
+          gh release edit "$TAG_NAME" --draft=false
