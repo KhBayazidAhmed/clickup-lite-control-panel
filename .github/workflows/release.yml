@@ -66,7 +66,7 @@ jobs:
                 tag_name: tag,
                 target_commitish: context.sha,
                 name: `ClickUp Lite ${tag}`,
-                body: `## ClickUp Lite ${tag}\n\nDesktop menubar companion for ClickUp.\n\n### Downloads\n- **macOS**: \`.dmg\` (Universal - Apple Silicon & Intel)\n- **Windows**: \`.exe\` (NSIS Installer)\n\n### SHA256 Checksums & Assets\nSee attached release artifacts below.`,
+                body: `## ClickUp Lite ${tag}\n\nDesktop menubar companion for ClickUp.\n\n### Downloads\n- **macOS (Apple Silicon)**: \`.dmg\` (M1 / M2 / M3 / M4 - ARM64)\n- **Windows**: \`.exe\` (NSIS Installer)\n\n### SHA256 Checksums & Assets\nSee attached release artifacts below.`,
                 draft: true,
                 prerelease: false,
               });
@@ -84,9 +84,9 @@ jobs:
       matrix:
         include:
           - platform: "macos-latest"
-            name: "Build macOS (Universal)"
-            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
-            args: "--target universal-apple-darwin --bundles dmg"
+            name: "Build macOS (Apple Silicon - aarch64)"
+            rust_targets: "aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --bundles dmg"
           - platform: "windows-latest"
             name: "Build Windows (x64)"
             rust_targets: "x86_64-pc-windows-msvc"
