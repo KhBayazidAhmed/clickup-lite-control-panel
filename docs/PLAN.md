@@ -101,7 +101,7 @@ The app lives entirely in the macOS menu bar (system tray) with zero clutter:
 
 ### Phase 1: Menu Bar Popup & Native Window Shell
 
-- [ ] Configure [tauri.conf.json](file:///Users/bixbd/Desktop/coding-heaven/clickup-lite-control-panel/apps/web/src-tauri/tauri.conf.json) for a frameless popup window (`width: 380`, `height: 560`, `decorations: false`, `transparent: true`).
+- [ ] Configure `apps/web/src-tauri/tauri.conf.json` for a frameless popup window (`width: 380`, `height: 560`, `decorations: false`, `transparent: true`).
 - [ ] Implement Rust tray icon with `TrayIconBuilder` and `tauri-plugin-positioner` to position the popup window directly below the tray icon.
 - [ ] Add root script `"dev:desktop": "bun --filter web desktop:dev"`.
 
