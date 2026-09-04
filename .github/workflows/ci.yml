@@ -33,7 +33,8 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: "apps/web/src-tauri -> target"
+          workspaces: "apps/web/src-tauri"
+          cache-all-crates: "true"
 
       - name: Install system dependencies for Tauri (Linux)
         run: |

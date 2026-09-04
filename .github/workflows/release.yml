@@ -53,22 +53,20 @@ jobs:
         with:
           script: |
             const tag = "${{ steps.get-tag.outputs.tag }}";
-            let release;
-            try {
-              const existing = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag: tag,
-              });
-              release = existing.data;
-            } catch (e) {
+            const releases = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 30,
+            });
+            let release = releases.data.find(r => r.tag_name === tag);
+            if (!release) {
               const created = await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 tag_name: tag,
                 target_commitish: context.sha,
                 name: `ClickUp Lite ${tag}`,
-                body: `## ClickUp Lite ${tag}\n\nDesktop menubar companion for ClickUp.\n\n### Downloads\n- **macOS**: \`.dmg\` (Universal - Apple Silicon & Intel)\n- **Windows**: \`.exe\` (NSIS Installer) / \`.msi\` (WiX Installer)\n\n### SHA256 Checksums & Assets\nSee attached release artifacts below.`,
+                body: `## ClickUp Lite ${tag}\n\nDesktop menubar companion for ClickUp.\n\n### Downloads\n- **macOS**: \`.dmg\` (Universal - Apple Silicon & Intel)\n- **Windows**: \`.exe\` (NSIS Installer)\n\n### SHA256 Checksums & Assets\nSee attached release artifacts below.`,
                 draft: true,
                 prerelease: false,
               });
@@ -88,11 +86,11 @@ jobs:
           - platform: "macos-latest"
             name: "Build macOS (Universal)"
             rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
-            args: "--target universal-apple-darwin"
+            args: "--target universal-apple-darwin --bundles dmg"
           - platform: "windows-latest"
             name: "Build Windows (x64)"
             rust_targets: "x86_64-pc-windows-msvc"
-            args: "--target x86_64-pc-windows-msvc"
+            args: "--target x86_64-pc-windows-msvc --bundles nsis"
 
     runs-on: ${{ matrix.platform }}
 
@@ -113,7 +111,8 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: "apps/web/src-tauri -> target"
+          workspaces: "apps/web/src-tauri"
+          cache-all-crates: "true"
 
       - name: Prepare environment file
         shell: bash
@@ -155,8 +154,12 @@ jobs:
     steps:
       - name: Publish draft release
         if: ${{ inputs.draft != true }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.create-draft.outputs.tag_name }}
-        run: |
-          gh release edit "$TAG_NAME" --draft=false
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-draft.outputs.release_id }},
+              draft: false,
+            });

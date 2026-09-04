@@ -27,3 +27,11 @@ tauri-plugin-positioner = { version = "2.0", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 reqwest = { version = "0.12", features = ["json"] }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 16
+strip = true
+panic = "abort"
+incremental = false
