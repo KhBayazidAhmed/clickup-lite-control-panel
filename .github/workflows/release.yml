@@ -66,7 +66,7 @@ jobs:
                 tag_name: tag,
                 target_commitish: context.sha,
                 name: `ClickUp Lite ${tag}`,
-                body: `## ClickUp Lite ${tag}\n\nDesktop menubar companion for ClickUp.\n\n### Downloads\n- **macOS (Apple Silicon)**: \`.dmg\` (M1 / M2 / M3 / M4 - ARM64)\n- **Windows**: \`.exe\` (NSIS Installer)\n\n### SHA256 Checksums & Assets\nSee attached release artifacts below.`,
+                body: `## ClickUp Lite ${tag}\n\nDesktop menubar companion for ClickUp (Apple Silicon & Windows).\n\n### Downloads\n- **macOS (Apple Silicon)**: \`ClickUp.Lite_${tag.replace(/^v/, '')}_aarch64.dmg\` (M1 / M2 / M3 / M4)\n- **Windows**: \`ClickUp.Lite_${tag.replace(/^v/, '')}_x64-setup.exe\` (NSIS Installer)\n\n---\n\n### ⚠️ Note for macOS Users\nBecause this app is open-source and not signed with an Apple Developer ID ($99/yr), macOS Gatekeeper blocks it on first download with a message saying *\"is damaged and can't be opened\"*.\n\nTo allow it to run, drag **ClickUp Lite** to \`/Applications\`, open **Terminal**, and run:\n\`\`\`bash\nxattr -cr \"/Applications/ClickUp Lite.app\"\n\`\`\`\nThen open ClickUp Lite normally.`,
                 draft: true,
                 prerelease: false,
               });
