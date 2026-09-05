@@ -80,7 +80,9 @@ export async function checkAppUpdate(): Promise<{
     if (
       rawMsg.includes("Could not fetch a valid release JSON") ||
       rawMsg.includes("404") ||
-      rawMsg.includes("release JSON")
+      rawMsg.includes("release JSON") ||
+      rawMsg.includes("None of the fallback platforms") ||
+      rawMsg.includes("fallback platforms")
     ) {
       cachedUpdate = null;
       return {

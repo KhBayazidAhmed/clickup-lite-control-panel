@@ -87,7 +87,7 @@ jobs:
           - platform: "macos-latest"
             name: "Build macOS (Apple Silicon - aarch64)"
             rust_targets: "aarch64-apple-darwin"
-            args: "--target aarch64-apple-darwin --bundles dmg"
+            args: "--target aarch64-apple-darwin --bundles app,dmg"
           - platform: "windows-latest"
             name: "Build Windows (x64)"
             rust_targets: "x86_64-pc-windows-msvc"
