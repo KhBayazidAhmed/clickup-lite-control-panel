@@ -16,7 +16,16 @@ import {
   CloudCheck,
   Pin,
   ListPlus,
+  Download,
+  Sparkles,
 } from "lucide-react";
+import {
+  checkAppUpdate,
+  downloadAndInstallAppUpdate,
+  relaunchApp,
+  getAppVersion,
+  type UpdateInfo,
+} from "../lib/updater";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
 import {
@@ -51,6 +60,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setIsPinned,
     taskCreationEnabled,
     setTaskCreationEnabled,
+    confirmTaskCompletion,
+    setConfirmTaskCompletion,
     dailyGoalHours,
     setDailyGoalHours,
     pomodoroDurationMinutes,
@@ -82,6 +93,21 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     type: "success" | "error";
     text: string;
   } | null>(null);
+
+  // Auto-updater state
+  const setAvailableUpdateVersion = useAppStore((s) => s.setAvailableUpdateVersion);
+  const [appVersion, setAppVersion] = useState("0.1.0");
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateStatusText, setUpdateStatusText] = useState<string | null>(null);
+  const [isDownloadingUpdate, setIsDownloadingUpdate] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<{
+    downloaded: number;
+    total: number;
+    percent: number;
+  } | null>(null);
+  const [isReadyToRestart, setIsReadyToRestart] = useState(false);
 
   useEffect(() => {
     setCustomGoalInput(String(dailyGoalHours));
@@ -124,6 +150,80 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setCustomGoalInput(String(rounded));
     }
   };
+
+  // Load app version and listen to update requests
+  useEffect(() => {
+    if (isOpen) {
+      getAppVersion().then((v) => setAppVersion(v));
+    }
+  }, [isOpen]);
+
+  const handleCheckForUpdates = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateError(null);
+    setUpdateStatusText(null);
+    try {
+      const res = await checkAppUpdate();
+      if (res.error) {
+        setUpdateError(res.error);
+        setUpdateStatusText(null);
+      } else if (res.updateAvailable && res.updateInfo) {
+        setUpdateInfo(res.updateInfo);
+        setAvailableUpdateVersion(res.updateInfo.version || null);
+        setUpdateStatusText(`New version ${res.updateInfo.version} is available!`);
+      } else {
+        setUpdateInfo(null);
+        setAvailableUpdateVersion(null);
+        setUpdateStatusText("ClickUp Lite is up to date!");
+      }
+    } catch (err: any) {
+      setUpdateError(err?.message || "Failed to check for updates");
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    setIsDownloadingUpdate(true);
+    setUpdateError(null);
+    setDownloadProgress({ downloaded: 0, total: 0, percent: 0 });
+
+    try {
+      await downloadAndInstallAppUpdate((downloaded, total) => {
+        const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+        setDownloadProgress({ downloaded, total, percent });
+      });
+      setIsReadyToRestart(true);
+      setUpdateStatusText("Update downloaded successfully! Ready to restart.");
+    } catch (err: any) {
+      setUpdateError(err?.message || "Failed to install update");
+    } finally {
+      setIsDownloadingUpdate(false);
+    }
+  };
+
+  const handleRestart = async () => {
+    try {
+      await relaunchApp();
+    } catch (err: any) {
+      setUpdateError(err?.message || "Failed to restart");
+    }
+  };
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("check-updates-requested", () => {
+      handleCheckForUpdates();
+    })
+      .then((unsub) => {
+        unlisten = unsub;
+      })
+      .catch(() => {});
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   // Check launch at login state when opening modal
   useEffect(() => {
@@ -645,6 +745,24 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
+                <CheckCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                <div className="flex flex-col">
+                  <span>Confirm Task Completion</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    Ask for confirmation before marking tasks complete
+                  </span>
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={confirmTaskCompletion}
+                onChange={(e) => setConfirmTaskCompletion(e.target.checked)}
+                className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
                 <Rocket className="h-3.5 w-3.5 text-muted-foreground" />
                 <div className="flex flex-col">
                   <span>Launch at Login</span>
@@ -786,6 +904,118 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   </div>
                 )}
               </div>
+            )}
+          </div>
+
+          {/* Software Updates */}
+          <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-medium text-foreground">
+                <Sparkles className="h-3.5 w-3.5 text-indigo-500" />
+                <span>Software Update</span>
+              </div>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
+                v{appVersion}
+              </span>
+            </div>
+
+            <p className="text-[10px] text-muted-foreground leading-normal">
+              Keep ClickUp Lite updated with the latest releases, features, and performance
+              enhancements.
+            </p>
+
+            {updateError && (
+              <div className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 p-2 text-[10px] text-destructive">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span>{updateError}</span>
+              </div>
+            )}
+
+            {updateStatusText && !updateError && !updateInfo && (
+              <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2 text-[10px] text-emerald-600 dark:text-emerald-400">
+                <CheckCircle className="h-3.5 w-3.5 shrink-0" />
+                <span>{updateStatusText}</span>
+              </div>
+            )}
+
+            {updateInfo && (
+              <div className="flex flex-col gap-2 rounded-md border border-indigo-500/30 bg-indigo-500/5 p-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                    <span className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
+                    <span>Version {updateInfo.version} Available</span>
+                  </div>
+                  {updateInfo.date && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {new Date(updateInfo.date).toLocaleDateString()}
+                    </span>
+                  )}
+                </div>
+
+                {updateInfo.body && (
+                  <div className="max-h-24 overflow-y-auto rounded bg-background/80 p-2 text-[10px] text-muted-foreground font-mono whitespace-pre-wrap border border-border/50">
+                    {updateInfo.body}
+                  </div>
+                )}
+
+                {downloadProgress && (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
+                      <span>Downloading update...</span>
+                      <span>{downloadProgress.percent}%</span>
+                    </div>
+                    <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-indigo-500 transition-all duration-200"
+                        style={{ width: `${downloadProgress.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {isReadyToRestart ? (
+                  <Button
+                    type="button"
+                    onClick={handleRestart}
+                    className="h-7 text-xs font-semibold w-full flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    <span>Restart & Apply Update</span>
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    onClick={handleInstallUpdate}
+                    disabled={isDownloadingUpdate}
+                    className="h-7 text-xs font-semibold w-full flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {isDownloadingUpdate ? (
+                      <>
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        <span>Downloading & Installing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="h-3 w-3" />
+                        <span>Update to v{updateInfo.version}</span>
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {!updateInfo && (
+              <Button
+                type="button"
+                onClick={handleCheckForUpdates}
+                disabled={isCheckingUpdate}
+                variant="outline"
+                className="h-7 text-xs font-medium w-full flex items-center justify-center gap-1.5 cursor-pointer mt-0.5"
+              >
+                <RefreshCw className={`h-3 w-3 ${isCheckingUpdate ? "animate-spin" : ""}`} />
+                <span>{isCheckingUpdate ? "Checking for Updates..." : "Check for Updates"}</span>
+              </Button>
             )}
           </div>
 

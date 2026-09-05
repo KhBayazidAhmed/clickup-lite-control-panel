@@ -75,7 +75,7 @@ export class ClickUpClient {
   private token: string;
 
   constructor(token: string) {
-    this.token = token;
+    this.token = (token || "").trim();
   }
 
   private async request<T>(
@@ -87,8 +87,13 @@ export class ClickUpClient {
     } = {},
   ): Promise<T> {
     const method = options.method || "GET";
+    const authHeader =
+      this.token.startsWith("pk_") || this.token.startsWith("Bearer ")
+        ? this.token
+        : `Bearer ${this.token}`;
+
     const headers: Record<string, string> = {
-      Authorization: this.token,
+      Authorization: authHeader,
       "Content-Type": "application/json",
       ...options.headers,
     };
@@ -118,55 +123,35 @@ export class ClickUpClient {
       const spacesData = await this.request<{ spaces: { id: string; name: string }[] }>(
         `/team/${teamId}/space?archived=false`,
       );
-      const spaces = spacesData.spaces || [];
+
       const allLists: ClickUpList[] = [];
 
-      await Promise.all(
-        spaces.map(async (space) => {
-          // 1. Folderless lists directly under space
-          const folderlessPromise = this.request<{ lists: { id: string; name: string }[] }>(
-            `/space/${space.id}/list?archived=false`,
-          )
-            .then((res) => {
-              for (const l of res.lists || []) {
-                allLists.push({
-                  id: l.id,
-                  name: l.name,
-                  space: { id: space.id, name: space.name },
-                });
-              }
-            })
-            .catch((err) => {
-              console.warn(`ClickUp: error fetching folderless lists for space ${space.id}:`, err);
-            });
+      for (const space of spacesData.spaces || []) {
+        const folderlessListsData = await this.request<{ lists: ClickUpList[] }>(
+          `/space/${space.id}/list?archived=false`,
+        ).catch(() => ({ lists: [] }));
 
-          // 2. Folders and lists inside folders
-          const folderPromise = this.request<{
-            folders: {
-              id: string;
-              name: string;
-              lists?: { id: string; name: string }[];
-            }[];
-          }>(`/space/${space.id}/folder?archived=false`)
-            .then((res) => {
-              for (const folder of res.folders || []) {
-                for (const l of folder.lists || []) {
-                  allLists.push({
-                    id: l.id,
-                    name: l.name,
-                    folder: { id: folder.id, name: folder.name },
-                    space: { id: space.id, name: space.name },
-                  });
-                }
-              }
-            })
-            .catch((err) => {
-              console.warn(`ClickUp: error fetching folders for space ${space.id}:`, err);
-            });
+        for (const list of folderlessListsData.lists || []) {
+          allLists.push({
+            ...list,
+            space: { id: space.id, name: space.name },
+          });
+        }
 
-          await Promise.all([folderlessPromise, folderPromise]);
-        }),
-      );
+        const foldersData = await this.request<{
+          folders: { id: string; name: string; lists: ClickUpList[] }[];
+        }>(`/space/${space.id}/folder?archived=false`).catch(() => ({ folders: [] }));
+
+        for (const folder of foldersData.folders || []) {
+          for (const list of folder.lists || []) {
+            allLists.push({
+              ...list,
+              space: { id: space.id, name: space.name },
+              folder: { id: folder.id, name: folder.name },
+            });
+          }
+        }
+      }
 
       return allLists;
     } catch (err) {
@@ -272,43 +257,102 @@ export class ClickUpClient {
     taskId?: string,
     description?: string,
   ): Promise<ClickUpTimeEntry | null> {
-    try {
-      const isRealTask =
-        taskId &&
-        !taskId.startsWith("demo-") &&
-        taskId !== "general" &&
-        !taskId.startsWith("task-") &&
-        !taskId.startsWith("local-");
-      const body: Record<string, unknown> = {
-        description: description || "",
-        billable: false,
-      };
+    const isRealTask =
+      taskId &&
+      !taskId.startsWith("demo-") &&
+      taskId !== "general" &&
+      !taskId.startsWith("task-") &&
+      !taskId.startsWith("local-");
+
+    const isCustomTask = Boolean(isRealTask && taskId && taskId.includes("-"));
+    const query = isCustomTask ? `?custom_task_ids=true&team_id=${teamId}` : "";
+
+    const doStart = async (customQuery = query, includeDescription = true) => {
+      const body: Record<string, unknown> = {};
       if (isRealTask) {
         body.tid = taskId;
       }
+      // Only include description if non-empty and allowed, preventing TIMEENTRY_064 plan limits
+      const desc = description?.trim();
+      if (includeDescription && desc) {
+        body.description = desc;
+      }
 
       const data = await this.request<{ data: ClickUpTimeEntry }>(
-        `/team/${teamId}/time_entries/start`,
+        `/team/${teamId}/time_entries/start${customQuery}`,
         {
           method: "POST",
           body: JSON.stringify(body),
         },
       );
-      return data.data;
-    } catch (err) {
+      return data?.data ?? (data as unknown as ClickUpTimeEntry) ?? null;
+    };
+
+    // Ensure any previously running timer in ClickUp is stopped before starting a new one
+    await this.stopTimeEntry(teamId).catch(() => {});
+
+    try {
+      return await doStart();
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+
+      // If failed due to Advanced Time Tracking plan limit (TIMEENTRY_064), retry without description
+      if (
+        errMsg.includes("TIMEENTRY_064") ||
+        errMsg.toLowerCase().includes("advanced time tracking")
+      ) {
+        try {
+          return await doStart(query, false);
+        } catch (planErr) {
+          console.warn("ClickUp startTimeEntry retry without description error:", planErr);
+        }
+      }
+
+      // If standard task ID failed with not found / inaccessible, retry with custom_task_ids
+      if (
+        !isCustomTask &&
+        isRealTask &&
+        (errMsg.includes("TASK_010") ||
+          errMsg.includes("TASK_001") ||
+          errMsg.toLowerCase().includes("not found"))
+      ) {
+        try {
+          return await doStart(`?custom_task_ids=true&team_id=${teamId}`);
+        } catch (customErr) {
+          const customErrMsg = customErr instanceof Error ? customErr.message : String(customErr);
+          if (
+            customErrMsg.includes("TIMEENTRY_064") ||
+            customErrMsg.toLowerCase().includes("advanced time tracking")
+          ) {
+            try {
+              return await doStart(`?custom_task_ids=true&team_id=${teamId}`, false);
+            } catch {
+              // ignore
+            }
+          }
+          console.warn("ClickUp startTimeEntry retry with custom_task_ids error:", customErr);
+        }
+      }
+
       console.warn("ClickUp startTimeEntry error:", err);
       return null;
     }
   }
 
   async stopTimeEntry(teamId: string): Promise<ClickUpTimeEntry | null> {
-    const data = await this.request<{ data: ClickUpTimeEntry }>(
-      `/team/${teamId}/time_entries/stop`,
-      {
-        method: "POST",
-      },
-    );
-    return data?.data ?? null;
+    try {
+      const data = await this.request<{ data: ClickUpTimeEntry }>(
+        `/team/${teamId}/time_entries/stop`,
+        {
+          method: "POST",
+          body: "{}",
+        },
+      );
+      return data?.data ?? (data as unknown as ClickUpTimeEntry) ?? null;
+    } catch (err) {
+      console.warn("ClickUp stopTimeEntry error (may not have been running):", err);
+      return null;
+    }
   }
 
   async createTimeEntry(
@@ -327,21 +371,43 @@ export class ClickUpClient {
       !entry.taskId.startsWith("task-") &&
       !entry.taskId.startsWith("local-");
 
-    const body: Record<string, unknown> = {
-      start: entry.start,
-      duration: entry.duration,
-      description: entry.description || "",
-      billable: false,
-    };
-    if (isRealTask) {
-      body.tid = entry.taskId;
-    }
+    const doCreate = async (includeDescription = true) => {
+      const body: Record<string, unknown> = {
+        start: entry.start,
+        duration: entry.duration,
+      };
+      if (isRealTask) {
+        body.tid = entry.taskId;
+      }
+      const desc = entry.description?.trim();
+      if (includeDescription && desc) {
+        body.description = desc;
+      }
 
-    const data = await this.request<{ data: ClickUpTimeEntry }>(`/team/${teamId}/time_entries`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    return data?.data ?? null;
+      const data = await this.request<{ data: ClickUpTimeEntry }>(`/team/${teamId}/time_entries`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      return data?.data ?? (data as unknown as ClickUpTimeEntry) ?? null;
+    };
+
+    try {
+      return await doCreate();
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (
+        errMsg.includes("TIMEENTRY_064") ||
+        errMsg.toLowerCase().includes("advanced time tracking")
+      ) {
+        try {
+          return await doCreate(false);
+        } catch (retryErr) {
+          console.warn("ClickUp createTimeEntry retry without description error:", retryErr);
+        }
+      }
+      console.warn("ClickUp createTimeEntry error:", err);
+      return null;
+    }
   }
 
   /** Rewrites an existing entry. Used to correct an entry that was left running
@@ -352,19 +418,42 @@ export class ClickUpClient {
     entryId: string,
     entry: { start?: number; duration?: number; description?: string },
   ): Promise<ClickUpTimeEntry | null> {
-    const body: Record<string, unknown> = {};
-    if (entry.start !== undefined) body.start = entry.start;
-    if (entry.duration !== undefined) body.duration = entry.duration;
-    if (entry.description !== undefined) body.description = entry.description;
+    const doUpdate = async (includeDescription = true) => {
+      const body: Record<string, unknown> = {};
+      if (entry.start !== undefined) body.start = entry.start;
+      if (entry.duration !== undefined) body.duration = entry.duration;
+      const desc = entry.description?.trim();
+      if (includeDescription && desc !== undefined && desc.length > 0) {
+        body.description = desc;
+      }
 
-    const data = await this.request<{ data: ClickUpTimeEntry }>(
-      `/team/${teamId}/time_entries/${entryId}`,
-      {
-        method: "PUT",
-        body: JSON.stringify(body),
-      },
-    );
-    return data?.data ?? null;
+      const data = await this.request<{ data: ClickUpTimeEntry }>(
+        `/team/${teamId}/time_entries/${entryId}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        },
+      );
+      return data?.data ?? (data as unknown as ClickUpTimeEntry) ?? null;
+    };
+
+    try {
+      return await doUpdate();
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (
+        errMsg.includes("TIMEENTRY_064") ||
+        errMsg.toLowerCase().includes("advanced time tracking")
+      ) {
+        try {
+          return await doUpdate(false);
+        } catch (retryErr) {
+          console.warn("ClickUp updateTimeEntry retry without description error:", retryErr);
+        }
+      }
+      console.warn("ClickUp updateTimeEntry error:", err);
+      return null;
+    }
   }
 
   async deleteTimeEntry(teamId: string, entryId: string): Promise<void> {

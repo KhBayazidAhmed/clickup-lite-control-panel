@@ -79,8 +79,11 @@ interface AppState {
   notificationsEnabled: boolean;
 
   // Window & UX
+  availableUpdateVersion: string | null;
+  setAvailableUpdateVersion: (version: string | null) => void;
   isPinned: boolean;
   taskCreationEnabled: boolean;
+  confirmTaskCompletion: boolean;
   activeTab: "active" | "due" | "all";
 
   // Lists & Tasks
@@ -102,6 +105,7 @@ interface AppState {
   setTeam: (id: string, name: string) => void;
   setIsPinned: (pinned: boolean) => void;
   setTaskCreationEnabled: (enabled: boolean) => void;
+  setConfirmTaskCompletion: (enabled: boolean) => void;
   setActiveTab: (tab: "active" | "due" | "all") => void;
   setSelectedListId: (listId: string | null) => void;
   setNotificationsEnabled: (enabled: boolean) => void;
@@ -152,9 +156,10 @@ function formatTime(seconds: number): string {
 
 /** What ClickUp stores as the entry's description: the user's note when there
  *  is one, otherwise the task name so an entry is never left unlabelled. */
-function entryDescription(taskName: string, note?: string): string {
-  const trimmed = (note || "").trim();
-  return trimmed || taskName;
+function entryDescription(_taskName: string, note?: string): string {
+  // Only return user notes; do NOT fallback to taskName because ClickUp
+  // counts non-empty descriptions as "Advanced Time Tracking" (40 use limit).
+  return (note || "").trim();
 }
 
 /** Shown in the menu bar whenever nothing is being tracked, so the slot always
@@ -209,8 +214,11 @@ export const useAppStore = create<AppState>()(
       pomodoroDurationMinutes: 25,
       notificationsEnabled: true,
 
+      availableUpdateVersion: null,
+      setAvailableUpdateVersion: (availableUpdateVersion) => set({ availableUpdateVersion }),
       isPinned: false,
       taskCreationEnabled: true,
+      confirmTaskCompletion: true,
       activeTab: "active",
 
       availableLists: [],
@@ -247,6 +255,7 @@ export const useAppStore = create<AppState>()(
         setNativePinned(isPinned);
       },
       setTaskCreationEnabled: (taskCreationEnabled) => set({ taskCreationEnabled }),
+      setConfirmTaskCompletion: (confirmTaskCompletion) => set({ confirmTaskCompletion }),
       setActiveTab: (activeTab) => set({ activeTab }),
       setSelectedListId: (selectedListId) => set({ selectedListId }),
       setNotificationsEnabled: (notificationsEnabled) => set({ notificationsEnabled }),
@@ -293,11 +302,24 @@ export const useAppStore = create<AppState>()(
         if (token && teamId) {
           try {
             const client = new ClickUpClient(token);
-            const entry = await client.startTimeEntry(teamId, taskId, taskName);
+            if (activeTimer && activeTimer.isRunning && activeTimer.entryId) {
+              await client.stopTimeEntry(teamId).catch(() => {});
+            }
+            const entry = await client.startTimeEntry(teamId, taskId);
             if (entry) {
               set((state) => ({
-                activeTimer: state.activeTimer ? { ...state.activeTimer, entryId: entry.id } : null,
+                activeTimer: state.activeTimer
+                  ? {
+                      ...state.activeTimer,
+                      entryId: entry.id,
+                      startTime:
+                        entry.start && Number(entry.start) > 0 && Number(entry.start) <= Date.now()
+                          ? Number(entry.start)
+                          : state.activeTimer.startTime,
+                    }
+                  : null,
               }));
+              get().syncTodayTime();
             }
           } catch (err) {
             console.warn("ClickUp API sync error on startTimer (will track locally):", err);
@@ -377,12 +399,13 @@ export const useAppStore = create<AppState>()(
             const entry = await client.startTimeEntry(
               teamId,
               activeTimer.taskId,
-              entryDescription(activeTimer.taskName, activeTimer.note),
+              activeTimer.note ? activeTimer.note.trim() : undefined,
             );
             if (entry) {
               set((state) => ({
                 activeTimer: state.activeTimer ? { ...state.activeTimer, entryId: entry.id } : null,
               }));
+              get().syncTodayTime();
             }
           } catch (err) {
             console.warn("ClickUp API sync error on resumeTimer:", err);
@@ -545,7 +568,7 @@ export const useAppStore = create<AppState>()(
       },
 
       logRecoveredTimer: async () => {
-        const { recoveredTimer, token, teamId, user } = get();
+        const { recoveredTimer, token, teamId } = get();
         if (!recoveredTimer) return;
 
         const { taskId, taskName, entryId, startTime, trackedSeconds, note } = recoveredTimer;
@@ -585,7 +608,7 @@ export const useAppStore = create<AppState>()(
           let serverEntry = null;
           if (entryId) {
             try {
-              serverEntry = await client.getCurrentTimeEntry(teamId, user?.id);
+              serverEntry = await client.getCurrentTimeEntry(teamId);
             } catch (err) {
               // Without knowing whether ClickUp still holds this entry we cannot
               // choose between correcting it and creating a new one — creating
@@ -626,7 +649,7 @@ export const useAppStore = create<AppState>()(
       },
 
       discardRecoveredTimer: async () => {
-        const { recoveredTimer, token, teamId, user } = get();
+        const { recoveredTimer, token, teamId } = get();
         if (!recoveredTimer) return;
 
         const { entryId } = recoveredTimer;
@@ -637,7 +660,7 @@ export const useAppStore = create<AppState>()(
         // not enough — it would keep running there forever.
         try {
           const client = new ClickUpClient(token);
-          const serverEntry = await client.getCurrentTimeEntry(teamId, user?.id);
+          const serverEntry = await client.getCurrentTimeEntry(teamId);
           if (serverEntry && serverEntry.id === entryId) {
             await client.stopTimeEntry(teamId);
             await client.deleteTimeEntry(teamId, entryId);
@@ -649,7 +672,7 @@ export const useAppStore = create<AppState>()(
       },
 
       syncCurrentTimer: async () => {
-        const { token, teamId, user, tasks } = get();
+        const { token, teamId, tasks } = get();
         if (!token || !teamId) return;
 
         if (syncTimerPromise) {
@@ -662,7 +685,7 @@ export const useAppStore = create<AppState>()(
 
             let entry: ClickUpTimeEntry | null = null;
             try {
-              entry = await client.getCurrentTimeEntry(teamId, user?.id);
+              entry = await client.getCurrentTimeEntry(teamId);
             } catch (err) {
               // We could not ask ClickUp. "Unknown" is not "nothing is running",
               // so leave local state intact instead of deleting a live timer.
@@ -756,6 +779,12 @@ export const useAppStore = create<AppState>()(
 
               setTrayTitle(`${formatTime(elapsed)}`);
             } else if (current && current.isRunning) {
+              // If the timer has no entryId yet (tracking locally or sync in flight)
+              // or was started less than 15s ago, do not wipe it out!
+              if (!current.entryId || Date.now() - current.startTime < 15000) {
+                return;
+              }
+
               // ClickUp definitively reports nothing running: the timer was stopped
               // elsewhere, so drop ours and re-read today's total.
               set({
@@ -1217,13 +1246,28 @@ export const useAppStore = create<AppState>()(
       },
 
       updateTaskStatus: async (taskId, newStatus) => {
-        const { token, tasks } = get();
+        const { token, tasks, subtasksByParent, activeTimer } = get();
 
         // Optimistic update
         const updated = tasks.map((t) =>
           t.id === taskId ? { ...t, status: { ...t.status, status: newStatus } } : t,
         );
-        set({ tasks: updated });
+        const updatedSubtasks: Record<string, ClickUpTask[]> = {};
+        for (const [parentId, children] of Object.entries(subtasksByParent)) {
+          updatedSubtasks[parentId] = children.map((s) =>
+            s.id === taskId ? { ...s, status: { ...s.status, status: newStatus } } : s,
+          );
+        }
+        set({ tasks: updated, subtasksByParent: updatedSubtasks });
+
+        // If completed task is currently tracking, stop timer and log it
+        const isComplete =
+          newStatus.toLowerCase().includes("complete") ||
+          newStatus.toLowerCase().includes("closed") ||
+          newStatus.toLowerCase().includes("done");
+        if (activeTimer && activeTimer.taskId === taskId && isComplete) {
+          await get().stopTimer();
+        }
 
         if (token && !taskId.startsWith("local-") && !taskId.startsWith("demo-")) {
           try {
@@ -1257,6 +1301,7 @@ export const useAppStore = create<AppState>()(
         pomodoroDurationMinutes: state.pomodoroDurationMinutes,
         isPinned: state.isPinned,
         taskCreationEnabled: state.taskCreationEnabled,
+        confirmTaskCompletion: state.confirmTaskCompletion ?? true,
         notificationsEnabled: state.notificationsEnabled,
         activeTimer: state.activeTimer,
         timerHeartbeat: state.timerHeartbeat,
@@ -1279,6 +1324,10 @@ export const useAppStore = create<AppState>()(
           // Ensure offlineTimeQueue is initialized as array
           if (!Array.isArray(state.offlineTimeQueue)) {
             state.offlineTimeQueue = [];
+          }
+
+          if (typeof state.confirmTaskCompletion !== "boolean") {
+            state.confirmTaskCompletion = true;
           }
 
           // Ensure availableLists is initialized as array

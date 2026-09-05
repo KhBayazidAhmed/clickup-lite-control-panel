@@ -24,6 +24,7 @@ export function ControlPanelHeader({
   const storeSyncAll = useAppStore((s) => s.syncAll);
   const isLoadingTasks = useAppStore((s) => s.isLoadingTasks);
   const storeIsSyncing = useAppStore((s) => s.isSyncing);
+  const availableUpdateVersion = useAppStore((s) => s.availableUpdateVersion);
   const { theme, setTheme } = useTheme();
 
   const handleSync =
@@ -142,10 +143,15 @@ export function ControlPanelHeader({
         <button
           type="button"
           onClick={onOpenSettings}
-          title="Settings"
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+          title={
+            availableUpdateVersion ? `Update available: v${availableUpdateVersion}` : "Settings"
+          }
+          className="relative flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
         >
           <Settings className="h-3.5 w-3.5" />
+          {availableUpdateVersion && (
+            <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-indigo-500 ring-2 ring-background animate-pulse" />
+          )}
         </button>
 
         <div className="h-3 w-px bg-border/60 mx-0.5" />

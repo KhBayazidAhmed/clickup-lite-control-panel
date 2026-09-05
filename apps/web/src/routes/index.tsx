@@ -23,6 +23,7 @@ function HomeComponent() {
   const setToken = useAppStore((s) => s.setToken);
   const setUser = useAppStore((s) => s.setUser);
   const setTeam = useAppStore((s) => s.setTeam);
+  const setAvailableUpdateVersion = useAppStore((s) => s.setAvailableUpdateVersion);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -36,6 +37,23 @@ function HomeComponent() {
     }, 1000);
     return () => clearInterval(timer);
   }, [tick]);
+
+  // Background update check on app startup
+  useEffect(() => {
+    if (!isTauri()) return;
+    const timer = setTimeout(async () => {
+      try {
+        const { checkAppUpdate } = await import("../lib/updater");
+        const res = await checkAppUpdate();
+        if (res.updateAvailable && res.updateInfo?.version) {
+          setAvailableUpdateVersion(res.updateInfo.version);
+        }
+      } catch (e) {
+        console.warn("Background update check failed:", e);
+      }
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [setAvailableUpdateVersion]);
 
   // Initial sync on mount and when token changes
   useEffect(() => {
@@ -120,6 +138,7 @@ function HomeComponent() {
 
     let unlistenTauriFocus: (() => void) | undefined;
     let unlistenTraySync: (() => void) | undefined;
+    let unlistenCheckUpdates: (() => void) | undefined;
     let unlistenOAuthCode: (() => void) | undefined;
     let unlistenOAuthCodeReceived: (() => void) | undefined;
 
@@ -146,6 +165,13 @@ function HomeComponent() {
             syncAll();
           }).then((unsub) => {
             unlistenTraySync = unsub;
+          });
+
+          // Listen for right-click tray check updates
+          listen("check-updates-requested", () => {
+            setIsSettingsOpen(true);
+          }).then((unsub) => {
+            unlistenCheckUpdates = unsub;
           });
 
           // Global OAuth handler: captures code even if modal is closed or window blurs
@@ -221,6 +247,9 @@ function HomeComponent() {
       }
       if (unlistenTraySync) {
         unlistenTraySync();
+      }
+      if (unlistenCheckUpdates) {
+        unlistenCheckUpdates();
       }
       if (unlistenOAuthCode) {
         unlistenOAuthCode();

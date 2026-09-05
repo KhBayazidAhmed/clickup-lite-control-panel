@@ -240,6 +240,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -265,8 +267,9 @@ pub fn run() {
             // Build Right-Click Context Menu for the Tray
             let show_i = MenuItem::with_id(app, "toggle_window", "Open / Close Panel", true, None::<&str>)?;
             let sync_i = MenuItem::with_id(app, "sync_clickup", "Sync with ClickUp", true, None::<&str>)?;
+            let update_i = MenuItem::with_id(app, "check_updates", "Check for Updates...", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit_app", "Quit ClickUp Lite", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_i, &sync_i, &quit_i])?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &sync_i, &update_i, &quit_i])?;
 
             // macOS and Linux use the monochrome template silhouette. Windows
             // has no template rendering and a dark taskbar by default, so a
@@ -298,6 +301,14 @@ pub fn run() {
                         }
                         "sync_clickup" => {
                             let _ = app.emit("tray-sync-requested", ());
+                        }
+                        "check_updates" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.move_window(Position::TrayCenter);
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                            let _ = app.emit("check-updates-requested", ());
                         }
                         "quit_app" => {
                             app.exit(0);
