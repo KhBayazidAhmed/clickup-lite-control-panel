@@ -57,9 +57,12 @@ Click the status bar icon to reveal an anchored control panel with live timer sy
 
 ### Pre-requisites
 
-- **Operating System**: macOS 11.0 (Big Sur) or newer (Apple Silicon & Intel supported)
+- **Operating System**:
+  - **macOS** 11.0 (Big Sur) or newer (Apple Silicon & Intel supported)
+  - **Windows** 10 1809 or newer (x64). The installer bundles the WebView2 runtime, so no separate download is needed.
 - **Node/Bun**: [Bun](https://bun.sh) (recommended) or Node.js 20+
 - **Rust**: Latest stable Rust toolchain (required only if compiling from source)
+- **Windows build tools** (only when compiling from source on Windows): [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload, plus the `x86_64-pc-windows-msvc` Rust target.
 
 ### 1. Clone & Install Dependencies
 
@@ -97,7 +100,7 @@ bun run dev:desktop
 
 ---
 
-## Building the Desktop App (macOS `.app` & `.dmg`)
+## Building the Desktop App
 
 To produce a production-ready, highly optimized standalone application and drag-and-drop installer:
 
@@ -118,6 +121,29 @@ To install, simply open the `.dmg` file and drag **ClickUp Lite** into your **Ap
 > ```bash
 > xattr -cr "/Applications/ClickUp Lite.app"
 > ```
+
+### Windows (`.exe` installer)
+
+Running `bun run desktop:build` on a Windows machine produces:
+
+- **NSIS Installer**: `apps/web/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/ClickUp Lite_0.1.0_x64-setup.exe`
+
+Windows installers cannot be cross-compiled from macOS. The executable resource
+step needs `llvm-rc` and the MSI bundler needs WiX, both of which require the
+MSVC toolchain. Use CI instead, which runs on a native Windows runner:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The **Release** workflow (`.github/workflows/release.yml`) builds the Windows
+NSIS installer and the macOS Apple Silicon DMG, then attaches both to a GitHub
+Release. You can also start it from the **Actions** tab with **Run workflow**,
+which accepts an optional tag and a "keep as draft" toggle.
+
+> [!NOTE]
+> **Windows SmartScreen Note**: the installer is not code-signed, so Windows shows a blue _"Windows protected your PC"_ dialog. Click **More info** then **Run anyway**. Suppressing it requires an Authenticode certificate configured via `bundle.windows.certificateThumbprint` in `tauri.conf.json`.
 
 ---
 

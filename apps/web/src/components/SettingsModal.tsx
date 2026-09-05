@@ -335,12 +335,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       if (ok) {
         setNotificationStatus({
           type: "success",
-          text: "Notification triggered successfully! Check your macOS Notification Center.",
+          text: "Notification triggered successfully! Check your system notification center.",
         });
       } else {
         setNotificationStatus({
           type: "error",
-          text: "Notification delivery returned false. Ensure macOS System Settings > Notifications allows alerts for this app.",
+          text: "Notification delivery returned false. Check that your OS notification settings allow alerts for this app.",
         });
       }
     } catch (e: unknown) {

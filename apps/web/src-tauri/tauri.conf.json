@@ -34,8 +34,8 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
-    "shortDescription": "ClickUp Lite Menubar Companion & Control Panel",
-    "longDescription": "A modern, lightweight macOS menu bar application for managing ClickUp tasks, pomodoro timer, and quick workflow actions.",
+    "shortDescription": "ClickUp Lite Tray Companion & Control Panel",
+    "longDescription": "A modern, lightweight menu bar and system tray application for managing ClickUp tasks, pomodoro timer, and quick workflow actions.",
     "copyright": "Copyright © 2025 ClickUp Lite",
     "icon": [
       "icons/32x32.png",
@@ -47,6 +47,15 @@
     "macOS": {
       "infoPlist": "Info.plist",
       "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      }
     }
   }
 }

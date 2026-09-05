@@ -12,7 +12,11 @@ use tauri_plugin_positioner::{Position, WindowExt};
 #[tauri::command]
 fn update_tray_title(app: AppHandle, title: String) -> Result<(), String> {
     if let Some(tray) = app.tray_by_id("main-tray") {
+        // `set_title` is a no-op on Windows, where tray icons cannot render
+        // text. Mirror the value into the tooltip so the timer stays visible.
+        #[cfg(not(target_os = "windows"))]
         let _ = tray.set_title(Some(&title));
+        let _ = tray.set_tooltip(Some(&format!("ClickUp Lite: {}", title)));
     }
     Ok(())
 }
@@ -20,7 +24,9 @@ fn update_tray_title(app: AppHandle, title: String) -> Result<(), String> {
 #[tauri::command]
 fn clear_tray_title(app: AppHandle) -> Result<(), String> {
     if let Some(tray) = app.tray_by_id("main-tray") {
+        #[cfg(not(target_os = "windows"))]
         let _ = tray.set_title(None::<&str>);
+        let _ = tray.set_tooltip(Some("ClickUp Lite"));
     }
     Ok(())
 }
@@ -41,30 +47,10 @@ fn set_pinned(state: tauri::State<'_, Arc<AtomicBool>>, pinned: bool) -> Result<
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", &url])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
+    // Must not go through `cmd /c start`: Rust does not quote arguments that
+    // contain no spaces, so cmd.exe would treat the `&` between OAuth query
+    // parameters as a command separator and truncate the URL.
+    tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -251,6 +237,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(http_client)
         .manage(is_pinned.clone())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -281,11 +268,17 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit_app", "Quit ClickUp Lite", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_i, &sync_i, &quit_i])?;
 
-            // Create menubar tray icon
-            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png")).expect("missing tray icon");
+            // macOS and Linux use the monochrome template silhouette. Windows
+            // has no template rendering and a dark taskbar by default, so a
+            // black-on-transparent icon would be invisible there.
+            #[cfg(target_os = "windows")]
+            const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/32x32.png");
+            #[cfg(not(target_os = "windows"))]
+            const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-icon.png");
+            let icon = tauri::image::Image::from_bytes(TRAY_ICON_BYTES).expect("missing tray icon");
             let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(icon)
-                .icon_as_template(true)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("ClickUp Lite")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)

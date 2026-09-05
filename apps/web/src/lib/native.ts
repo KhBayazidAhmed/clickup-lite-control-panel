@@ -9,6 +9,13 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/** Named system sounds like "Ping" only exist on macOS. Windows toasts expect
+ *  an `ms-winsoundevent:` value and silently drop anything else. */
+export function isMacOS(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   if (isTauri()) {
     try {
@@ -100,11 +107,7 @@ export async function requestNotificationPermission(): Promise<boolean> {
   }
 }
 
-export async function notify(
-  title: string,
-  body: string,
-  sound: string = "Ping",
-): Promise<boolean> {
+export async function notify(title: string, body: string, sound?: string): Promise<boolean> {
   if (!isTauri()) {
     if (typeof window !== "undefined" && "Notification" in window) {
       if (Notification.permission === "granted") {
@@ -129,7 +132,11 @@ export async function notify(
       hasPermission = permission === "granted";
     }
     if (hasPermission) {
-      tauriSendNotification({ title, body, sound });
+      // Only macOS accepts a named sound; elsewhere let the OS pick its default.
+      const resolvedSound = isMacOS() ? (sound ?? "Ping") : undefined;
+      tauriSendNotification(
+        resolvedSound ? { title, body, sound: resolvedSound } : { title, body },
+      );
       return true;
     }
     console.warn("Notification permission was not granted by OS/user.");

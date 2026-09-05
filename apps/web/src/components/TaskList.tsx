@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpTask } from "../lib/clickup";
-import { openExternalUrl } from "../lib/native";
+import { openExternalUrl, isMacOS } from "../lib/native";
 import { toast } from "sonner";
 
 const PRIORITY_CONFIG: Record<string, { label: string; class: string }> = {
@@ -425,7 +425,7 @@ export function TaskList() {
     <div className="flex flex-col gap-2 flex-1 min-h-0 overflow-hidden">
       {/* Segmented Tabs & Action Row */}
       <div className="flex items-center justify-between gap-1.5 shrink-0">
-        {/* macOS Native Segmented Control */}
+        {/* Native-style Segmented Control */}
         <div className="flex items-center rounded-md border border-border/70 bg-secondary/50 p-0.5 text-xs font-medium">
           <button
             type="button"
@@ -489,7 +489,7 @@ export function TaskList() {
                 ? "border-foreground bg-foreground text-background"
                 : "border-border/60 bg-secondary/50 text-muted-foreground hover:text-foreground"
             }`}
-            title="Search or Add Task (Cmd+F)"
+            title={`Search or Add Task (${isMacOS() ? "Cmd" : "Ctrl"}+F)`}
           >
             <Search className="h-3 w-3" />
           </button>
