@@ -1,6 +1,7 @@
 import { useTheme } from "./theme-provider";
 import { useAppStore } from "../store/useAppStore";
 import { Moon, Pin, RefreshCw, Settings, Sun, X } from "lucide-react";
+import { toast } from "sonner";
 
 interface ControlPanelHeaderProps {
   onOpenSettings: () => void;
@@ -22,10 +23,20 @@ export function ControlPanelHeader({
   const setIsPinned = useAppStore((s) => s.setIsPinned);
   const storeSyncAll = useAppStore((s) => s.syncAll);
   const isLoadingTasks = useAppStore((s) => s.isLoadingTasks);
+  const storeIsSyncing = useAppStore((s) => s.isSyncing);
   const { theme, setTheme } = useTheme();
 
-  const handleSync = onSync || storeSyncAll;
-  const syncing = isSyncing !== undefined ? isSyncing : isLoadingTasks;
+  const handleSync =
+    onSync ||
+    (async () => {
+      const result = await storeSyncAll();
+      if (result.ok) {
+        toast.success("Synced with ClickUp", { duration: 1500 });
+      } else {
+        toast.error(result.error || "Sync failed", { duration: 3500 });
+      }
+    });
+  const syncing = isSyncing !== undefined ? isSyncing : storeIsSyncing || isLoadingTasks;
 
   const handleClose = () => {
     if (onClose) {

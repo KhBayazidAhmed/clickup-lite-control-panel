@@ -1,7 +1,13 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { ClickUpClient, ClickUpList, ClickUpTask, ClickUpUser } from "../lib/clickup";
-import { notify, setTrayTitle, clearTrayTitle, setNativePinned } from "../lib/native";
+import {
+  ClickUpClient,
+  ClickUpList,
+  ClickUpTask,
+  ClickUpTimeEntry,
+  ClickUpUser,
+} from "../lib/clickup";
+import { notify, setTrayTitle, setNativePinned } from "../lib/native";
 
 export interface ActiveTimer {
   entryId?: string;
@@ -10,6 +16,22 @@ export interface ActiveTimer {
   startTime: number;
   accumulatedSeconds?: number;
   isRunning: boolean;
+  /** Free-text note logged as the ClickUp time entry's description. */
+  note?: string;
+}
+
+/** A timer that was still marked running when the app last stopped ticking.
+ *  Held aside for the user to confirm instead of being counted or dropped. */
+export interface RecoveredTimer {
+  taskId: string;
+  taskName: string;
+  entryId?: string;
+  startTime: number;
+  /** Seconds actually tracked, i.e. up to the last heartbeat — never the gap. */
+  trackedSeconds: number;
+  /** Wall-clock seconds between the last heartbeat and this launch. */
+  gapSeconds: number;
+  note?: string;
 }
 
 export interface PendingTimeEntry {
@@ -19,6 +41,7 @@ export interface PendingTimeEntry {
   start: number;
   durationMs: number;
   createdAt: number;
+  note?: string;
 }
 
 interface AppState {
@@ -37,6 +60,13 @@ interface AppState {
   todayLoggedSeconds: number;
   dailyGoalHours: number;
   isSyncing: boolean;
+  lastSyncError: string | null;
+  /** Written every tick so a relaunch can tell tracked time from downtime. */
+  timerHeartbeat: number | null;
+  recoveredTimer: RecoveredTimer | null;
+  /** A ClickUp entry we failed to stop; retried on every sync so it can never
+   *  keep running (and inflating) behind our back. */
+  pendingStopEntryId: string | null;
 
   // Offline Sync Queue
   offlineTimeQueue: PendingTimeEntry[];
@@ -50,6 +80,7 @@ interface AppState {
 
   // Window & UX
   isPinned: boolean;
+  taskCreationEnabled: boolean;
   activeTab: "active" | "due" | "all";
 
   // Lists & Tasks
@@ -58,6 +89,10 @@ interface AppState {
   isLoadingLists: boolean;
   isCreatingTask: boolean;
   tasks: ClickUpTask[];
+  /** Subtasks fetched per parent id. Kept apart from `tasks` so counts and
+   *  filters keep reflecting what is actually assigned to the user. */
+  subtasksByParent: Record<string, ClickUpTask[]>;
+  isLoadingSubtasks: boolean;
   isLoadingTasks: boolean;
   lastTaskPollTime: number | null;
 
@@ -66,6 +101,7 @@ interface AppState {
   setUser: (user: ClickUpUser | null) => void;
   setTeam: (id: string, name: string) => void;
   setIsPinned: (pinned: boolean) => void;
+  setTaskCreationEnabled: (enabled: boolean) => void;
   setActiveTab: (tab: "active" | "due" | "all") => void;
   setSelectedListId: (listId: string | null) => void;
   setNotificationsEnabled: (enabled: boolean) => void;
@@ -74,13 +110,17 @@ interface AppState {
 
   // Timer Actions
   startTimer: (taskId: string, taskName: string) => Promise<void>;
+  setTimerNote: (note: string) => Promise<void>;
   pauseTimer: () => Promise<void>;
   resumeTimer: () => Promise<void>;
   stopTimer: () => Promise<void>;
   tick: () => void;
+  logRecoveredTimer: () => Promise<void>;
+  discardRecoveredTimer: () => Promise<void>;
   syncCurrentTimer: () => Promise<void>;
   syncTodayTime: () => Promise<void>;
-  syncAll: () => Promise<void>;
+  syncAll: () => Promise<{ ok: boolean; error?: string }>;
+  fetchSubtasks: () => Promise<void>;
 
   // List & Task Actions
   fetchLists: () => Promise<ClickUpList[]>;
@@ -110,10 +150,30 @@ function formatTime(seconds: number): string {
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
 }
 
+/** What ClickUp stores as the entry's description: the user's note when there
+ *  is one, otherwise the task name so an entry is never left unlabelled. */
+function entryDescription(taskName: string, note?: string): string {
+  const trimmed = (note || "").trim();
+  return trimmed || taskName;
+}
+
+/** Shown in the menu bar whenever nothing is being tracked, so the slot always
+ *  holds a clock rather than disappearing. */
+const IDLE_TRAY_TITLE = "00:00";
+
+/** A relaunch gap longer than this means the app was not ticking, so the wall
+ *  clock since then is downtime rather than tracked work. */
+const STALE_GAP_MS = 90_000;
+
 // In-flight request deduplication promises & polling state
+/** Bounds on the per-task subtask fan-out. */
+const SUBTASK_FETCH_LIMIT = 40;
+const SUBTASK_FETCH_CONCURRENCY = 5;
+
 let syncTimerPromise: Promise<void> | null = null;
 let syncTodayPromise: Promise<void> | null = null;
 let fetchTasksPromise: Promise<void> | null = null;
+let fetchSubtasksPromise: Promise<void> | null = null;
 let fetchListsPromise: Promise<ClickUpList[]> | null = null;
 let pollTasksPromise: Promise<void> | null = null;
 let flushOfflinePromise: Promise<void> | null = null;
@@ -137,6 +197,10 @@ export const useAppStore = create<AppState>()(
       todayLoggedSeconds: 0,
       dailyGoalHours: 8,
       isSyncing: false,
+      lastSyncError: null,
+      timerHeartbeat: null,
+      recoveredTimer: null,
+      pendingStopEntryId: null,
 
       offlineTimeQueue: [],
 
@@ -146,6 +210,7 @@ export const useAppStore = create<AppState>()(
       notificationsEnabled: true,
 
       isPinned: false,
+      taskCreationEnabled: true,
       activeTab: "active",
 
       availableLists: [],
@@ -153,6 +218,8 @@ export const useAppStore = create<AppState>()(
       isLoadingLists: false,
       isCreatingTask: false,
       tasks: [],
+      subtasksByParent: {},
+      isLoadingSubtasks: false,
       isLoadingTasks: false,
       lastTaskPollTime: null,
 
@@ -179,6 +246,7 @@ export const useAppStore = create<AppState>()(
         set({ isPinned });
         setNativePinned(isPinned);
       },
+      setTaskCreationEnabled: (taskCreationEnabled) => set({ taskCreationEnabled }),
       setActiveTab: (activeTab) => set({ activeTab }),
       setSelectedListId: (selectedListId) => set({ selectedListId }),
       setNotificationsEnabled: (notificationsEnabled) => set({ notificationsEnabled }),
@@ -216,6 +284,8 @@ export const useAppStore = create<AppState>()(
           },
           elapsedSeconds: 0,
           todayLoggedSeconds: updatedToday,
+          timerHeartbeat: now,
+          recoveredTimer: null,
         });
 
         setTrayTitle(`00:00`);
@@ -235,6 +305,30 @@ export const useAppStore = create<AppState>()(
         }
       },
 
+      /** Attaches a note to the running session. Pushed to ClickUp right away
+       *  when an entry already exists there, so the note survives a stop that
+       *  happens elsewhere (or a crash) rather than only landing on stop. */
+      setTimerNote: async (note) => {
+        const { activeTimer, token, teamId } = get();
+        if (!activeTimer) return;
+        if ((activeTimer.note || "") === note) return;
+
+        set({ activeTimer: { ...activeTimer, note } });
+
+        const entryId = activeTimer.entryId;
+        if (!entryId || !token || !teamId) return;
+
+        try {
+          const client = new ClickUpClient(token);
+          await client.updateTimeEntry(teamId, entryId, {
+            description: entryDescription(activeTimer.taskName, note),
+          });
+        } catch (err) {
+          // The note is kept locally and re-sent when the timer is stopped.
+          console.warn("ClickUp API sync error on setTimerNote:", err);
+        }
+      },
+
       pauseTimer: async () => {
         const { activeTimer, elapsedSeconds, token, teamId } = get();
         if (!activeTimer || !activeTimer.isRunning) return;
@@ -245,6 +339,7 @@ export const useAppStore = create<AppState>()(
             isRunning: false,
             accumulatedSeconds: elapsedSeconds,
           },
+          timerHeartbeat: null,
         });
 
         setTrayTitle("⏸ Paused");
@@ -270,6 +365,7 @@ export const useAppStore = create<AppState>()(
             startTime: now,
             isRunning: true,
           },
+          timerHeartbeat: now,
         });
 
         const timeStr = formatTime(activeTimer.accumulatedSeconds || 0);
@@ -281,7 +377,7 @@ export const useAppStore = create<AppState>()(
             const entry = await client.startTimeEntry(
               teamId,
               activeTimer.taskId,
-              activeTimer.taskName,
+              entryDescription(activeTimer.taskName, activeTimer.note),
             );
             if (entry) {
               set((state) => ({
@@ -302,31 +398,53 @@ export const useAppStore = create<AppState>()(
         const startTime = activeTimer.startTime;
         const taskId = activeTimer.taskId;
         const taskName = activeTimer.taskName;
-        const hadEntryId = Boolean(activeTimer.entryId);
+        const note = activeTimer.note;
+        const entryId = activeTimer.entryId;
+        const hadEntryId = Boolean(entryId);
 
         set({
           activeTimer: null,
           todayLoggedSeconds: todayLoggedSeconds + elapsedSeconds,
           elapsedSeconds: 0,
+          timerHeartbeat: null,
         });
 
-        clearTrayTitle();
+        setTrayTitle(IDLE_TRAY_TITLE);
 
         if (token && teamId && durationMs >= 1000) {
           try {
             const client = new ClickUpClient(token);
             if (hadEntryId) {
               await client.stopTimeEntry(teamId);
+              // Re-send the note in case it was typed before the entry existed
+              // or an earlier push failed.
+              if ((note || "").trim() && entryId) {
+                await client.updateTimeEntry(teamId, entryId, {
+                  description: entryDescription(taskName, note),
+                });
+              }
             } else {
               await client.createTimeEntry(teamId, {
                 start: startTime,
                 duration: durationMs,
-                description: taskName,
+                description: entryDescription(taskName, note),
                 taskId,
               });
             }
             await get().syncTodayTime();
           } catch (err) {
+            // ClickUp already holds this entry and it is still running there.
+            // Queueing a copy would double-log, so retry the stop instead.
+            if (hadEntryId && entryId) {
+              set({ pendingStopEntryId: entryId });
+              console.warn("Failed to stop the ClickUp entry; will retry on next sync:", err);
+              notify(
+                "Couldn't Stop Timer",
+                `"${taskName}" is still running in ClickUp. Retrying automatically.`,
+              );
+              return;
+            }
+
             console.warn("Failed to log timer online. Enqueuing for offline sync:", err);
             const pendingEntry: PendingTimeEntry = {
               id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -335,6 +453,7 @@ export const useAppStore = create<AppState>()(
               start: startTime,
               durationMs,
               createdAt: Date.now(),
+              note,
             };
             set((state) => ({
               offlineTimeQueue: [...state.offlineTimeQueue, pendingEntry],
@@ -363,7 +482,7 @@ export const useAppStore = create<AppState>()(
               await client.createTimeEntry(teamId, {
                 start: item.start,
                 duration: item.durationMs,
-                description: item.taskName,
+                description: entryDescription(item.taskName, item.note),
                 taskId: item.taskId,
               });
               syncedCount++;
@@ -399,7 +518,7 @@ export const useAppStore = create<AppState>()(
             (activeTimer.accumulatedSeconds || 0) +
             Math.max(0, Math.floor((Date.now() - activeTimer.startTime) / 1000));
 
-          set({ elapsedSeconds: currentElapsed });
+          set({ elapsedSeconds: currentElapsed, timerHeartbeat: Date.now() });
 
           // Update menu bar title
           const timeStr = formatTime(currentElapsed);
@@ -425,6 +544,110 @@ export const useAppStore = create<AppState>()(
         }
       },
 
+      logRecoveredTimer: async () => {
+        const { recoveredTimer, token, teamId, user } = get();
+        if (!recoveredTimer) return;
+
+        const { taskId, taskName, entryId, startTime, trackedSeconds, note } = recoveredTimer;
+        const durationMs = trackedSeconds * 1000;
+
+        set({ recoveredTimer: null });
+        if (durationMs < 1000) return;
+
+        const enqueueOffline = () => {
+          set((state) => ({
+            offlineTimeQueue: [
+              ...state.offlineTimeQueue,
+              {
+                id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                taskId,
+                taskName,
+                start: startTime,
+                durationMs,
+                createdAt: Date.now(),
+                note,
+              },
+            ],
+          }));
+          notify(
+            "Saved Offline",
+            `"${taskName}" (${formatTime(trackedSeconds)}) will sync when connection returns.`,
+          );
+        };
+
+        if (!token || !teamId) {
+          enqueueOffline();
+          return;
+        }
+
+        const client = new ClickUpClient(token);
+        try {
+          let serverEntry = null;
+          if (entryId) {
+            try {
+              serverEntry = await client.getCurrentTimeEntry(teamId, user?.id);
+            } catch (err) {
+              // Without knowing whether ClickUp still holds this entry we cannot
+              // choose between correcting it and creating a new one — creating
+              // one blindly would double-log. Hand it back for a later retry.
+              console.warn("Could not check ClickUp before logging recovered time:", err);
+              set({ recoveredTimer });
+              notify(
+                "Couldn't Reach ClickUp",
+                `"${taskName}" is still waiting to be logged. Try again when you're online.`,
+              );
+              return;
+            }
+          }
+
+          if (entryId && serverEntry && serverEntry.id === entryId) {
+            // Still open on ClickUp, so it has been accruing the whole downtime.
+            // Stop it, then rewrite it to the time actually tracked.
+            await client.stopTimeEntry(teamId);
+            await client.updateTimeEntry(teamId, entryId, {
+              start: startTime,
+              duration: durationMs,
+              description: entryDescription(taskName, note),
+            });
+          } else {
+            await client.createTimeEntry(teamId, {
+              start: startTime,
+              duration: durationMs,
+              description: entryDescription(taskName, note),
+              taskId,
+            });
+          }
+          await get().syncTodayTime();
+          notify("Time Logged", `"${taskName}" (${formatTime(trackedSeconds)}) saved to ClickUp.`);
+        } catch (err) {
+          console.warn("Failed to log recovered time online:", err);
+          enqueueOffline();
+        }
+      },
+
+      discardRecoveredTimer: async () => {
+        const { recoveredTimer, token, teamId, user } = get();
+        if (!recoveredTimer) return;
+
+        const { entryId } = recoveredTimer;
+        set({ recoveredTimer: null });
+        if (!token || !teamId || !entryId) return;
+
+        // If the abandoned entry is still open on ClickUp, discarding locally is
+        // not enough — it would keep running there forever.
+        try {
+          const client = new ClickUpClient(token);
+          const serverEntry = await client.getCurrentTimeEntry(teamId, user?.id);
+          if (serverEntry && serverEntry.id === entryId) {
+            await client.stopTimeEntry(teamId);
+            await client.deleteTimeEntry(teamId, entryId);
+            await get().syncTodayTime();
+          }
+        } catch (err) {
+          console.warn("Failed to discard the abandoned ClickUp entry:", err);
+        }
+      },
+
       syncCurrentTimer: async () => {
         const { token, teamId, user, tasks } = get();
         if (!token || !teamId) return;
@@ -436,12 +659,66 @@ export const useAppStore = create<AppState>()(
         syncTimerPromise = (async () => {
           try {
             const client = new ClickUpClient(token);
-            const entry = await client.getCurrentTimeEntry(teamId, user?.id);
 
-            if (entry && (!entry.stop || Number(entry.duration) < 0)) {
+            let entry: ClickUpTimeEntry | null = null;
+            try {
+              entry = await client.getCurrentTimeEntry(teamId, user?.id);
+            } catch (err) {
+              // We could not ask ClickUp. "Unknown" is not "nothing is running",
+              // so leave local state intact instead of deleting a live timer.
+              console.warn("Could not reach ClickUp to sync the timer; keeping local state:", err);
+              return;
+            }
+
+            const serverIsRunning = entry !== null && (!entry.stop || Number(entry.duration) < 0);
+
+            // Settle any stop we still owe ClickUp before reading the server as
+            // truth — an entry we failed to stop keeps accruing time there.
+            // Only stop it if it is still the running one, so a timer started
+            // since then is never cut short.
+            const stuckEntryId = get().pendingStopEntryId;
+            if (stuckEntryId) {
+              if (entry && serverIsRunning && entry.id === stuckEntryId) {
+                try {
+                  await client.stopTimeEntry(teamId);
+                  set({ pendingStopEntryId: null });
+                  await get().syncTodayTime();
+                } catch (err) {
+                  console.warn("Retrying a pending timer stop failed:", err);
+                }
+                return;
+              }
+              // It is no longer running, so nothing is owed.
+              set({ pendingStopEntryId: null });
+            }
+
+            const current = get().activeTimer;
+
+            if (entry && serverIsRunning) {
+              // A locally paused timer must never be revived by the server copy
+              // we failed to stop; that turns a pause into billed time.
+              if (
+                current &&
+                !current.isRunning &&
+                (!current.entryId || current.entryId === entry.id)
+              ) {
+                try {
+                  await client.stopTimeEntry(teamId);
+                  await get().syncTodayTime();
+                } catch (err) {
+                  set({ pendingStopEntryId: entry.id });
+                  console.warn("Could not stop the ClickUp entry behind a paused timer:", err);
+                }
+                return;
+              }
+
               const startTimestamp = Number(entry.start);
               const now = Date.now();
-              const elapsed = Math.max(0, Math.floor((now - startTimestamp) / 1000));
+              if (!Number.isFinite(startTimestamp) || startTimestamp <= 0 || startTimestamp > now) {
+                console.warn("Ignoring ClickUp entry with an implausible start:", entry.start);
+                return;
+              }
+
               const taskId = entry.task?.id || "";
               const taskName =
                 entry.task?.name ||
@@ -449,33 +726,45 @@ export const useAppStore = create<AppState>()(
                 entry.description ||
                 "Active Task";
 
+              // Segments finished before this one (e.g. before a pause) exist only
+              // in local accumulatedSeconds — the server entry starts at the resume.
+              const continuesLocal =
+                current !== null &&
+                current.isRunning &&
+                (current.entryId === entry.id || current.taskId === taskId);
+              const accumulated = continuesLocal ? current.accumulatedSeconds || 0 : 0;
+              // A description that is not just the task name is a note, whether
+              // it was written here or in ClickUp.
+              const serverNote =
+                entry.description && entry.description !== taskName ? entry.description : undefined;
+              const note = continuesLocal ? current.note || serverNote : serverNote;
+              const elapsed = accumulated + Math.max(0, Math.floor((now - startTimestamp) / 1000));
+
               set({
                 activeTimer: {
                   entryId: entry.id,
                   taskId,
                   taskName,
                   startTime: startTimestamp,
-                  accumulatedSeconds: 0,
+                  accumulatedSeconds: accumulated,
                   isRunning: true,
+                  note,
                 },
                 elapsedSeconds: elapsed,
+                timerHeartbeat: now,
               });
 
               setTrayTitle(`${formatTime(elapsed)}`);
-            } else {
-              // No running timer returned from ClickUp
-              const current = get().activeTimer;
-              // If local state thought a ClickUp-linked timer was running, align with server
-              if (current && (current.entryId || token)) {
-                if (current.isRunning) {
-                  set({
-                    activeTimer: null,
-                    elapsedSeconds: 0,
-                  });
-                  clearTrayTitle();
-                  await get().syncTodayTime();
-                }
-              }
+            } else if (current && current.isRunning) {
+              // ClickUp definitively reports nothing running: the timer was stopped
+              // elsewhere, so drop ours and re-read today's total.
+              set({
+                activeTimer: null,
+                elapsedSeconds: 0,
+                timerHeartbeat: null,
+              });
+              setTrayTitle(IDLE_TRAY_TITLE);
+              await get().syncTodayTime();
             }
           } catch (err) {
             console.warn("Failed to sync current timer from ClickUp:", err);
@@ -511,12 +800,25 @@ export const useAppStore = create<AppState>()(
             );
 
             if (Array.isArray(entries)) {
+              const dayStart = startOfDay.getTime();
+              const dayEnd = endOfDay.getTime();
               let totalSeconds = 0;
               for (const entry of entries) {
-                const dur = Number(entry.duration);
                 // In ClickUp API, completed entries have positive duration in milliseconds
-                if (dur > 0) {
+                const dur = Number(entry.duration);
+                if (!(dur > 0)) continue;
+
+                // An entry that began before midnight is returned in full; count
+                // only the part that actually falls inside today.
+                const entryStart = Number(entry.start);
+                if (!Number.isFinite(entryStart) || entryStart <= 0) {
                   totalSeconds += Math.floor(dur / 1000);
+                  continue;
+                }
+                const overlapMs =
+                  Math.min(entryStart + dur, dayEnd) - Math.max(entryStart, dayStart);
+                if (overlapMs > 0) {
+                  totalSeconds += Math.floor(overlapMs / 1000);
                 }
               }
               set({ todayLoggedSeconds: totalSeconds });
@@ -584,11 +886,32 @@ export const useAppStore = create<AppState>()(
       },
 
       syncAll: async () => {
-        const { token, teamId } = get();
-        if (!token || !teamId) return;
+        const { token } = get();
+        if (!token) {
+          return { ok: false, error: "Not connected to ClickUp. Add a token in Settings." };
+        }
 
-        set({ isSyncing: true });
+        set({ isSyncing: true, lastSyncError: null });
         try {
+          // A persisted session can carry a token without a workspace id (an older
+          // build, or a getTeams() call that failed at connect time). Recover it
+          // here instead of returning silently and leaving the button inert.
+          if (!get().teamId) {
+            try {
+              const teams = await new ClickUpClient(token).getTeams();
+              const first = teams?.[0];
+              if (!first) {
+                return { ok: false, error: "No ClickUp workspace found for this account." };
+              }
+              get().setTeam(first.id, first.name);
+            } catch (err) {
+              return {
+                ok: false,
+                error: err instanceof Error ? err.message : "Could not reach ClickUp.",
+              };
+            }
+          }
+
           await Promise.allSettled([
             get().flushOfflineQueue(),
             get().fetchTasks(),
@@ -596,6 +919,9 @@ export const useAppStore = create<AppState>()(
             get().syncCurrentTimer(),
             get().syncTodayTime(),
           ]);
+
+          const error = get().lastSyncError;
+          return error ? { ok: false, error } : { ok: true };
         } finally {
           set({ isSyncing: false });
         }
@@ -650,15 +976,77 @@ export const useAppStore = create<AppState>()(
                 lastTaskPollTime: Date.now(),
               };
             });
+
+            // Fire and forget: rows render immediately, subtasks fill in after.
+            get().fetchSubtasks();
           } catch (err) {
             console.error("Failed to fetch tasks:", err);
-            set({ isLoadingTasks: false });
+            set({
+              isLoadingTasks: false,
+              lastSyncError: err instanceof Error ? err.message : "Failed to fetch tasks",
+            });
           } finally {
             fetchTasksPromise = null;
           }
         })();
 
         return fetchTasksPromise;
+      },
+
+      /** The workspace task query is assignee-filtered, so it returns a subtask
+       *  only when that subtask is assigned to the user, and never its parent.
+       *  Pull the real tree for each visible task so rows can be grouped. */
+      fetchSubtasks: async () => {
+        const { token, tasks } = get();
+        if (!token || tasks.length === 0) return;
+
+        if (fetchSubtasksPromise) {
+          return fetchSubtasksPromise;
+        }
+
+        fetchSubtasksPromise = (async () => {
+          set({ isLoadingSubtasks: true });
+          try {
+            const client = new ClickUpClient(token);
+            const known = new Set(tasks.map((t) => t.id));
+            // Only ask about tasks that are not themselves a known subtask, and
+            // cap the fan-out so a large workspace cannot flood the API.
+            const roots = tasks
+              .filter((t) => !t.parent || !known.has(t.parent))
+              .filter((t) => !t.id.startsWith("local-") && !t.id.startsWith("demo-"))
+              .slice(0, SUBTASK_FETCH_LIMIT);
+
+            const results: Record<string, ClickUpTask[]> = {};
+            let cursor = 0;
+            const worker = async () => {
+              while (cursor < roots.length) {
+                const task = roots[cursor++];
+                if (!task) return;
+                try {
+                  const full = await client.getTask(task.id, true);
+                  const children = (full.subtasks || []).filter((sub) => sub.id !== task.id);
+                  if (children.length > 0) {
+                    results[task.id] = children;
+                  }
+                } catch (err) {
+                  console.warn(`Failed to fetch subtasks for ${task.id}:`, err);
+                }
+              }
+            };
+            await Promise.all(
+              Array.from({ length: Math.min(SUBTASK_FETCH_CONCURRENCY, roots.length) }, worker),
+            );
+
+            set({ subtasksByParent: results, isLoadingSubtasks: false });
+          } catch (err) {
+            console.warn("Failed to fetch subtasks:", err);
+            set({ isLoadingSubtasks: false });
+          } finally {
+            fetchSubtasksPromise = null;
+          }
+        })();
+
+        return fetchSubtasksPromise;
       },
 
       pollTaskUpdates: async () => {
@@ -730,7 +1118,12 @@ export const useAppStore = create<AppState>()(
       },
 
       createTask: async ({ name, listId, priority, dueDate, description }) => {
-        const { token, teamId, user, selectedListId, availableLists, tasks } = get();
+        const { token, teamId, user, selectedListId, availableLists, tasks, taskCreationEnabled } =
+          get();
+
+        if (!taskCreationEnabled) {
+          throw new Error("Task creation is disabled in Settings.");
+        }
 
         // If offline / no token connected, save locally
         if (!token || !teamId) {
@@ -863,11 +1256,16 @@ export const useAppStore = create<AppState>()(
         dailyGoalHours: state.dailyGoalHours,
         pomodoroDurationMinutes: state.pomodoroDurationMinutes,
         isPinned: state.isPinned,
+        taskCreationEnabled: state.taskCreationEnabled,
         notificationsEnabled: state.notificationsEnabled,
         activeTimer: state.activeTimer,
+        timerHeartbeat: state.timerHeartbeat,
+        recoveredTimer: state.recoveredTimer,
+        pendingStopEntryId: state.pendingStopEntryId,
         todayLoggedSeconds: state.todayLoggedSeconds,
         offlineTimeQueue: state.offlineTimeQueue || [],
         tasks: (state.tasks || []).filter((t) => !t.id.startsWith("demo-")),
+        subtasksByParent: state.subtasksByParent || {},
         availableLists: state.availableLists || [],
         selectedListId: state.selectedListId,
       }),
@@ -898,18 +1296,51 @@ export const useAppStore = create<AppState>()(
           if (state.activeTimer?.taskId?.startsWith("demo-")) {
             state.activeTimer = null;
             state.elapsedSeconds = 0;
-            clearTrayTitle();
+            setTrayTitle(IDLE_TRAY_TITLE);
           } else if (state.activeTimer) {
             if (state.activeTimer.isRunning) {
-              const elapsed =
-                (state.activeTimer.accumulatedSeconds || 0) +
-                Math.max(0, Math.floor((Date.now() - state.activeTimer.startTime) / 1000));
-              state.elapsedSeconds = elapsed;
-              setTrayTitle(`${formatTime(elapsed)}`);
+              const timer = state.activeTimer;
+              const heartbeat = state.timerHeartbeat;
+              // The last tick is the last moment we can vouch for. Anything after
+              // it is time the app was closed or the machine asleep.
+              const lastSeen =
+                typeof heartbeat === "number" && heartbeat > timer.startTime
+                  ? heartbeat
+                  : timer.startTime;
+              const gapMs = Date.now() - lastSeen;
+
+              if (gapMs > STALE_GAP_MS) {
+                state.recoveredTimer = {
+                  taskId: timer.taskId,
+                  taskName: timer.taskName,
+                  entryId: timer.entryId,
+                  startTime: timer.startTime,
+                  trackedSeconds:
+                    (timer.accumulatedSeconds || 0) +
+                    Math.max(0, Math.floor((lastSeen - timer.startTime) / 1000)),
+                  gapSeconds: Math.floor(gapMs / 1000),
+                  note: timer.note,
+                };
+                state.activeTimer = null;
+                state.elapsedSeconds = 0;
+                state.timerHeartbeat = null;
+                setTrayTitle(IDLE_TRAY_TITLE);
+              } else {
+                const elapsed =
+                  (timer.accumulatedSeconds || 0) +
+                  Math.max(0, Math.floor((Date.now() - timer.startTime) / 1000));
+                state.elapsedSeconds = elapsed;
+                setTrayTitle(`${formatTime(elapsed)}`);
+              }
             } else {
               state.elapsedSeconds = state.activeTimer.accumulatedSeconds || 0;
               setTrayTitle("⏸ Paused");
             }
+          }
+
+          if (!state.activeTimer) {
+            state.elapsedSeconds = 0;
+            setTrayTitle(IDLE_TRAY_TITLE);
           }
         }
       },

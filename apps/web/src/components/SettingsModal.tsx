@@ -15,6 +15,7 @@ import {
   CloudOff,
   CloudCheck,
   Pin,
+  ListPlus,
 } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
@@ -48,6 +49,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     syncAll,
     isPinned,
     setIsPinned,
+    taskCreationEnabled,
+    setTaskCreationEnabled,
     dailyGoalHours,
     setDailyGoalHours,
     pomodoroDurationMinutes,
@@ -618,6 +621,24 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 type="checkbox"
                 checked={isPinned}
                 onChange={(e) => setIsPinned(e.target.checked)}
+                className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ListPlus className="h-3.5 w-3.5 text-muted-foreground" />
+                <div className="flex flex-col">
+                  <span>Enable Task Creation</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    Turn off to use the input for searching only
+                  </span>
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={taskCreationEnabled}
+                onChange={(e) => setTaskCreationEnabled(e.target.checked)}
                 className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
               />
             </div>

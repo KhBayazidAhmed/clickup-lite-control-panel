@@ -41,10 +41,16 @@ export interface ClickUpTask {
     color: string;
   } | null;
   due_date?: string | null;
+  parent?: string | null;
+  top_level_parent?: string | null;
   list?: {
     id: string;
     name: string;
   };
+}
+
+export interface ClickUpTaskWithSubtasks extends ClickUpTask {
+  subtasks?: ClickUpTask[];
 }
 
 export interface ClickUpTimeEntry {
@@ -178,6 +184,13 @@ export class ClickUpClient {
     return data.tasks || [];
   }
 
+  /** Single task fetch. `include_subtasks` returns every descendant (flattened,
+   *  each carrying its own `parent`) alongside the task itself. */
+  async getTask(taskId: string, includeSubtasks = false): Promise<ClickUpTaskWithSubtasks> {
+    const query = includeSubtasks ? "?include_subtasks=true" : "";
+    return await this.request<ClickUpTaskWithSubtasks>(`/task/${taskId}${query}`);
+  }
+
   async createTask(
     listId: string,
     data: {
@@ -217,24 +230,22 @@ export class ClickUpClient {
     });
   }
 
+  /** Throws on transport/auth failure so callers can tell "nothing is running"
+   *  apart from "we could not ask". Returning null for both would let a dropped
+   *  request silently delete a live timer. */
   async getCurrentTimeEntry(teamId: string, assigneeId?: number): Promise<ClickUpTimeEntry | null> {
-    try {
-      let url = `/team/${teamId}/time_entries/current`;
-      if (assigneeId) {
-        url += `?assignee=${assigneeId}`;
-      }
-      const data = await this.request<{ data: ClickUpTimeEntry | null | ClickUpTimeEntry[] }>(url);
-      if (!data || !data.data) {
-        return null;
-      }
-      if (Array.isArray(data.data)) {
-        return data.data.length > 0 ? data.data[0]! : null;
-      }
-      return data.data;
-    } catch (err) {
-      console.warn("ClickUp getCurrentTimeEntry error:", err);
+    let url = `/team/${teamId}/time_entries/current`;
+    if (assigneeId) {
+      url += `?assignee=${assigneeId}`;
+    }
+    const data = await this.request<{ data: ClickUpTimeEntry | null | ClickUpTimeEntry[] }>(url);
+    if (!data || !data.data) {
       return null;
     }
+    if (Array.isArray(data.data)) {
+      return data.data.length > 0 ? data.data[0]! : null;
+    }
+    return data.data;
   }
 
   async getTimeEntries(
@@ -331,6 +342,35 @@ export class ClickUpClient {
       body: JSON.stringify(body),
     });
     return data?.data ?? null;
+  }
+
+  /** Rewrites an existing entry. Used to correct an entry that was left running
+   *  while the app was closed, so ClickUp records the time actually tracked
+   *  rather than the wall-clock gap, and to attach a note to a live entry. */
+  async updateTimeEntry(
+    teamId: string,
+    entryId: string,
+    entry: { start?: number; duration?: number; description?: string },
+  ): Promise<ClickUpTimeEntry | null> {
+    const body: Record<string, unknown> = {};
+    if (entry.start !== undefined) body.start = entry.start;
+    if (entry.duration !== undefined) body.duration = entry.duration;
+    if (entry.description !== undefined) body.description = entry.description;
+
+    const data = await this.request<{ data: ClickUpTimeEntry }>(
+      `/team/${teamId}/time_entries/${entryId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    );
+    return data?.data ?? null;
+  }
+
+  async deleteTimeEntry(teamId: string, entryId: string): Promise<void> {
+    await this.request(`/team/${teamId}/time_entries/${entryId}`, {
+      method: "DELETE",
+    });
   }
 }
 

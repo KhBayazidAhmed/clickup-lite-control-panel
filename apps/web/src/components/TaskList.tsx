@@ -82,6 +82,18 @@ interface TaskRowProps {
   isCurrent: boolean;
   isTimerRunning: boolean;
   onToggleTimer: (task: ClickUpTask) => void;
+  /** Drop the row's own border/rounding: it sits inside a group card that owns them. */
+  flat?: boolean;
+  /** Only present to give its subtasks a home; it did not match the filter itself. */
+  isContext?: boolean;
+  subtaskSummary?: { done: number; total: number } | null;
+  isCollapsed?: boolean;
+  onToggleCollapse?: (taskId: string) => void;
+}
+
+function openTaskInClickUp(taskId: string) {
+  openExternalUrl(`https://app.clickup.com/t/${taskId}`);
+  toast.success("Opening in ClickUp...", { duration: 1500 });
 }
 
 const TaskRow = React.memo(function TaskRow({
@@ -89,6 +101,11 @@ const TaskRow = React.memo(function TaskRow({
   isCurrent,
   isTimerRunning,
   onToggleTimer,
+  flat = false,
+  isContext = false,
+  subtaskSummary = null,
+  isCollapsed = false,
+  onToggleCollapse,
 }: TaskRowProps) {
   const statusName = task.status?.status?.toLowerCase() || "to do";
   const isCompleted = statusName.includes("complete") || statusName.includes("closed");
@@ -99,20 +116,21 @@ const TaskRow = React.memo(function TaskRow({
 
   const handleOpenClickUp = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const url = `https://app.clickup.com/t/${task.id}`;
-    openExternalUrl(url);
-    toast.success("Opening in ClickUp...", { duration: 1500 });
+    openTaskInClickUp(task.id);
   };
 
   return (
     <div
-      className={`group relative flex items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-xs transition-all cursor-default select-none ${
+      className={`group relative flex items-center justify-between gap-2 px-2.5 py-2 text-xs transition-all cursor-default select-none ${
+        flat ? "" : "rounded-md border"
+      } ${
         isCurrent
           ? isTimerRunning
-            ? "border-emerald-500/50 bg-emerald-500/10 shadow-xs"
-            : "border-amber-500/50 bg-amber-500/10 shadow-xs"
-          : "border-border/70 bg-card hover:border-border hover:bg-secondary/30"
-      }`}
+            ? `bg-emerald-500/10 ${flat ? "" : "border-emerald-500/50 shadow-xs"}`
+            : `bg-amber-500/10 ${flat ? "" : "border-amber-500/50 shadow-xs"}`
+          : `hover:bg-secondary/30 ${flat ? "" : "border-border/70 bg-card hover:border-border"}`
+      } ${isContext ? "opacity-70" : ""}`}
+      title={isContext ? "Parent task \u2014 shown for context" : undefined}
     >
       {/* Left: Dedicated Task Start / Pause Button */}
       <button
@@ -183,7 +201,7 @@ const TaskRow = React.memo(function TaskRow({
         </div>
       </div>
 
-      {/* Right: Hover Actions & Read-Only Status Badge */}
+      {/* Right: Subtask Toggle, Hover Actions & Read-Only Status Badge */}
       <div className="flex items-center gap-1.5 shrink-0">
         {/* Open in ClickUp Web (Revealed on hover) */}
         <button
@@ -195,32 +213,157 @@ const TaskRow = React.memo(function TaskRow({
           <ExternalLink className="h-3 w-3" />
         </button>
 
-        {/* Read-Only Status Badge */}
-        <div
-          className={`flex items-center gap-1.2 rounded-md px-1.8 py-0.5 text-[10px] font-medium border select-none cursor-default ${
-            isCompleted
-              ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
-              : isInProgress
-                ? "bg-sky-500/15 text-sky-400 border-sky-500/30"
-                : "bg-secondary/60 text-muted-foreground border-border/70"
-          }`}
-          title={`Status: ${task.status?.status || "To Do"} (Read-only)`}
-        >
-          {isCompleted ? (
-            <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 shrink-0" />
-          ) : (
-            <span
-              className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                isInProgress ? "bg-sky-400" : "bg-muted-foreground/60"
-              }`}
-              style={task.status?.color ? { backgroundColor: task.status.color } : undefined}
+        {subtaskSummary && onToggleCollapse ? (
+          <button
+            type="button"
+            onClick={() => onToggleCollapse(task.id)}
+            className={`flex h-5 items-center gap-0.5 rounded-md border pl-0.5 pr-1.5 text-[10px] font-semibold transition-colors cursor-pointer ${
+              subtaskSummary.done === subtaskSummary.total
+                ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-400"
+                : "border-border/70 bg-secondary/60 text-muted-foreground hover:text-foreground"
+            }`}
+            title={`${isCollapsed ? "Show" : "Hide"} ${subtaskSummary.total} subtask${
+              subtaskSummary.total === 1 ? "" : "s"
+            }`}
+          >
+            <ChevronDown
+              className={`h-3 w-3 transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
             />
-          )}
-          <span className="capitalize truncate max-w-[70px] font-normal">
-            {task.status?.status || "To Do"}
-          </span>
-        </div>
+            <span className="tabular-nums">
+              {subtaskSummary.done}/{subtaskSummary.total}
+            </span>
+          </button>
+        ) : (
+          /* Read-Only Status Badge */
+          <div
+            className={`flex items-center gap-1.2 rounded-md px-1.8 py-0.5 text-[10px] font-medium border select-none cursor-default ${
+              isCompleted
+                ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                : isInProgress
+                  ? "bg-sky-500/15 text-sky-400 border-sky-500/30"
+                  : "bg-secondary/60 text-muted-foreground border-border/70"
+            }`}
+            title={`Status: ${task.status?.status || "To Do"} (Read-only)`}
+          >
+            {isCompleted ? (
+              <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400 shrink-0" />
+            ) : (
+              <span
+                className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                  isInProgress ? "bg-sky-400" : "bg-muted-foreground/60"
+                }`}
+                style={task.status?.color ? { backgroundColor: task.status.color } : undefined}
+              />
+            )}
+            <span className="capitalize truncate max-w-[70px] font-normal">
+              {task.status?.status || "To Do"}
+            </span>
+          </div>
+        )}
       </div>
+    </div>
+  );
+});
+
+interface SubtaskRowProps {
+  task: ClickUpTask;
+  depth: number;
+  isCurrent: boolean;
+  isTimerRunning: boolean;
+  isContext: boolean;
+  onToggleTimer: (task: ClickUpTask) => void;
+}
+
+/** A single dense line: subtasks are context under a parent, not cards of their own. */
+const SubtaskRow = React.memo(function SubtaskRow({
+  task,
+  depth,
+  isCurrent,
+  isTimerRunning,
+  isContext,
+  onToggleTimer,
+}: SubtaskRowProps) {
+  const statusName = task.status?.status?.toLowerCase() || "to do";
+  const isCompleted = statusName.includes("complete") || statusName.includes("closed");
+  const isInProgress = statusName.includes("in progress") || statusName.includes("doing");
+  const dueInfo = formatDueDate(task.due_date);
+
+  return (
+    <div
+      className={`group/sub flex h-6 items-center gap-1.5 rounded pr-1 text-[11px] transition-colors ${
+        isCurrent
+          ? isTimerRunning
+            ? "bg-emerald-500/15"
+            : "bg-amber-500/15"
+          : "hover:bg-secondary/70"
+      } ${isContext ? "opacity-60" : ""}`}
+      style={{ paddingLeft: 4 + depth * 12 }}
+      title={task.name}
+    >
+      <button
+        type="button"
+        onClick={() => onToggleTimer(task)}
+        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors cursor-pointer ${
+          isTimerRunning
+            ? "bg-emerald-500 text-white"
+            : isCurrent
+              ? "bg-amber-500 text-white"
+              : "text-muted-foreground/60 hover:bg-foreground hover:text-background"
+        }`}
+        title={isTimerRunning ? "Pause time tracking" : "Start time tracking on this subtask"}
+      >
+        {isTimerRunning ? (
+          <Pause className="h-2 w-2 fill-current" />
+        ) : (
+          <Play className="h-2 w-2 fill-current ml-px" />
+        )}
+      </button>
+
+      <span
+        className={`flex-1 truncate ${
+          isCompleted
+            ? "line-through text-muted-foreground/50"
+            : isCurrent
+              ? "text-foreground font-semibold"
+              : "text-foreground/90"
+        }`}
+      >
+        {task.name}
+      </span>
+
+      {dueInfo && (dueInfo.isOverdue || dueInfo.isToday) && (
+        <span
+          className={`shrink-0 text-[9px] font-semibold ${
+            dueInfo.isOverdue ? "text-rose-400" : "text-amber-400"
+          }`}
+        >
+          {dueInfo.text}
+        </span>
+      )}
+
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          openTaskInClickUp(task.id);
+        }}
+        className="opacity-0 group-hover/sub:opacity-100 flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground transition-all cursor-pointer"
+        title="Open in ClickUp Web"
+      >
+        <ExternalLink className="h-2.5 w-2.5" />
+      </button>
+
+      {isCompleted ? (
+        <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-400" />
+      ) : (
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+            isInProgress ? "bg-sky-400" : "bg-muted-foreground/50"
+          }`}
+          style={task.status?.color ? { backgroundColor: task.status.color } : undefined}
+          title={task.status?.status || "To Do"}
+        />
+      )}
     </div>
   );
 });
@@ -243,6 +386,8 @@ export function TaskList() {
   const isLoadingLists = useAppStore((s) => s.isLoadingLists);
   const isCreatingTask = useAppStore((s) => s.isCreatingTask);
   const createTask = useAppStore((s) => s.createTask);
+  const taskCreationEnabled = useAppStore((s) => s.taskCreationEnabled);
+  const subtasksByParent = useAppStore((s) => s.subtasksByParent);
 
   // Unified Search & Add input state
   const [taskInput, setTaskInput] = useState("");
@@ -251,6 +396,7 @@ export function TaskList() {
   const [isPriorityPickerOpen, setIsPriorityPickerOpen] = useState(false);
   const [listSearchQuery, setListSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState<"default" | "priority" | "due">("default");
+  const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(new Set());
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listPickerRef = useRef<HTMLDivElement>(null);
@@ -311,7 +457,7 @@ export function TaskList() {
 
   const handleCreateTask = async () => {
     const title = taskInput.trim();
-    if (!title || isCreatingTask) return;
+    if (!title || isCreatingTask || !taskCreationEnabled) return;
 
     try {
       const created = await createTask({
@@ -336,7 +482,7 @@ export function TaskList() {
       inputRef.current?.blur();
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && taskCreationEnabled) {
       e.preventDefault();
       await handleCreateTask();
     }
@@ -367,44 +513,156 @@ export function TaskList() {
     ).length;
   }, [tasks]);
 
-  // Real-time task filtering using the unified taskInput
-  const filteredTasks = useMemo(() => {
-    let list = tasks.filter((t) => {
+  const passesTabFilter = useCallback(
+    (t: ClickUpTask) => {
       const status = t.status?.status?.toLowerCase() || "";
       if (activeTab === "active") {
-        if (status.includes("complete") || status.includes("closed")) return false;
-      } else if (activeTab === "due") {
-        if (!t.due_date) return false;
+        return !status.includes("complete") && !status.includes("closed");
       }
-
-      if (taskInput.trim()) {
-        const q = taskInput.toLowerCase().trim();
-        const matchName = t.name.toLowerCase().includes(q);
-        const matchProject = t.list?.name?.toLowerCase().includes(q) ?? false;
-        const matchPriority = t.priority?.priority?.toLowerCase().includes(q) ?? false;
-        const matchStatus = t.status?.status?.toLowerCase().includes(q) ?? false;
-        if (!matchName && !matchProject && !matchPriority && !matchStatus) return false;
+      if (activeTab === "due") {
+        return Boolean(t.due_date);
       }
-
       return true;
-    });
+    },
+    [activeTab],
+  );
 
-    if (sortBy === "priority") {
-      list = [...list].sort((a, b) => {
-        const pA = PRIORITY_ORDER[a.priority?.priority?.toLowerCase() || ""] || 99;
-        const pB = PRIORITY_ORDER[b.priority?.priority?.toLowerCase() || ""] || 99;
-        return pA - pB;
-      });
-    } else if (sortBy === "due") {
-      list = [...list].sort((a, b) => {
-        const dA = a.due_date ? Number(a.due_date) : Infinity;
-        const dB = b.due_date ? Number(b.due_date) : Infinity;
-        return dA - dB;
-      });
+  const matchesQuery = useCallback(
+    (t: ClickUpTask) => {
+      const q = taskInput.trim().toLowerCase();
+      if (!q) return true;
+      return (
+        t.name.toLowerCase().includes(q) ||
+        (t.list?.name?.toLowerCase().includes(q) ?? false) ||
+        (t.priority?.priority?.toLowerCase().includes(q) ?? false) ||
+        (t.status?.status?.toLowerCase().includes(q) ?? false)
+      );
+    },
+    [taskInput],
+  );
+
+  // Tasks assigned to the user that survive the current tab + search filters.
+  const filteredTasks = useMemo(
+    () => tasks.filter((t) => passesTabFilter(t) && matchesQuery(t)),
+    [tasks, passesTabFilter, matchesQuery],
+  );
+
+  // Group tasks with their subtasks: each group is one top-level task followed by
+  // its descendants in depth-first order. Ancestors are pulled in as context so an
+  // assigned subtask never floats on its own, and descendants come from both the
+  // assigned tasks and the subtask trees fetched per parent.
+  const taskGroups = useMemo(() => {
+    const byId = new Map<string, ClickUpTask>();
+    const originalIndex = new Map<string, number>();
+    tasks.forEach((t, i) => {
+      byId.set(t.id, t);
+      originalIndex.set(t.id, i);
+    });
+    // Fetched subtasks fill gaps but never overwrite the assigned copy.
+    for (const children of Object.values(subtasksByParent)) {
+      for (const child of children) {
+        if (!byId.has(child.id)) byId.set(child.id, child);
+      }
     }
 
-    return list;
-  }, [tasks, activeTab, taskInput, sortBy]);
+    const matchedIds = new Set(filteredTasks.map((t) => t.id));
+
+    const parentOf = (task: ClickUpTask): ClickUpTask | undefined => {
+      if (!task.parent) return undefined;
+      const parent = byId.get(task.parent);
+      return parent && parent.id !== task.id ? parent : undefined;
+    };
+
+    const childIndex = new Map<string, ClickUpTask[]>();
+    const addChild = (parentId: string, child: ClickUpTask) => {
+      const siblings = childIndex.get(parentId);
+      if (siblings) {
+        if (!siblings.some((s) => s.id === child.id)) siblings.push(child);
+      } else {
+        childIndex.set(parentId, [child]);
+      }
+    };
+    for (const task of byId.values()) {
+      const parent = parentOf(task);
+      if (parent) addChild(parent.id, task);
+    }
+    for (const [parentId, children] of Object.entries(subtasksByParent)) {
+      if (!byId.has(parentId)) continue;
+      for (const child of children) {
+        if (child.id !== parentId) addChild(parentId, byId.get(child.id) || child);
+      }
+    }
+
+    const compare = (a: ClickUpTask, b: ClickUpTask) => {
+      if (sortBy === "priority") {
+        const pA = PRIORITY_ORDER[a.priority?.priority?.toLowerCase() || ""] || 99;
+        const pB = PRIORITY_ORDER[b.priority?.priority?.toLowerCase() || ""] || 99;
+        if (pA !== pB) return pA - pB;
+      } else if (sortBy === "due") {
+        const dA = a.due_date ? Number(a.due_date) : Infinity;
+        const dB = b.due_date ? Number(b.due_date) : Infinity;
+        if (dA !== dB) return dA - dB;
+      }
+      return (originalIndex.get(a.id) ?? Infinity) - (originalIndex.get(b.id) ?? Infinity);
+    };
+
+    // Every matching task hangs off its top-most known ancestor.
+    const roots: ClickUpTask[] = [];
+    const seenRoots = new Set<string>();
+    for (const task of filteredTasks) {
+      let root = task;
+      const guard = new Set([task.id]);
+      let parent = parentOf(root);
+      while (parent && !guard.has(parent.id)) {
+        guard.add(parent.id);
+        root = parent;
+        parent = parentOf(root);
+      }
+      if (!seenRoots.has(root.id)) {
+        seenRoots.add(root.id);
+        roots.push(root);
+      }
+    }
+    roots.sort(compare);
+
+    return roots.map((root) => {
+      const descendants: { task: ClickUpTask; depth: number }[] = [];
+      let total = 0;
+      let done = 0;
+      const walk = (parent: ClickUpTask, depth: number) => {
+        const children = [...(childIndex.get(parent.id) || [])].sort(compare);
+        for (const child of children) {
+          total += 1;
+          const status = child.status?.status?.toLowerCase() || "";
+          if (status.includes("complete") || status.includes("closed")) done += 1;
+          // A subtask is shown when it matches on its own, or when it simply
+          // belongs under a parent the user is looking at.
+          if (matchedIds.has(child.id) || passesTabFilter(child)) {
+            descendants.push({ task: child, depth });
+          }
+          walk(child, depth + 1);
+        }
+      };
+      walk(root, 0);
+
+      return {
+        root,
+        rootIsContext: !matchedIds.has(root.id),
+        descendants,
+        summary: total > 0 ? { done, total } : null,
+        matchedIds,
+      };
+    });
+  }, [tasks, subtasksByParent, filteredTasks, sortBy, passesTabFilter]);
+
+  const toggleCollapsed = useCallback((taskId: string) => {
+    setCollapsedTaskIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  }, []);
 
   const cycleSort = () => {
     if (sortBy === "default") {
@@ -418,6 +676,25 @@ export function TaskList() {
       toast.info("Default sort order", { duration: 1200 });
     }
   };
+
+  // Whether the task viewport has content clipped above/below it, so the fades
+  // only appear when there is actually something to scroll to.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollUp, setCanScrollUp] = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+
+  const updateScrollEdges = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setCanScrollUp(el.scrollTop > 1);
+    setCanScrollDown(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+  }, []);
+
+  // Re-measure whenever the rendered set changes: filtering, collapsing a group
+  // or a sync can turn a scrollable list into a short one and back.
+  useEffect(() => {
+    updateScrollEdges();
+  }, [updateScrollEdges, taskGroups, collapsedTaskIds, isLoadingTasks]);
 
   const currentPriorityObj = PRIORITY_OPTIONS.find((p) => p.value === selectedPriority);
 
@@ -489,7 +766,9 @@ export function TaskList() {
                 ? "border-foreground bg-foreground text-background"
                 : "border-border/60 bg-secondary/50 text-muted-foreground hover:text-foreground"
             }`}
-            title={`Search or Add Task (${isMacOS() ? "Cmd" : "Ctrl"}+F)`}
+            title={`${taskCreationEnabled ? "Search or Add Task" : "Search Tasks"} (${
+              isMacOS() ? "Cmd" : "Ctrl"
+            }+F)`}
           >
             <Search className="h-3 w-3" />
           </button>
@@ -513,9 +792,11 @@ export function TaskList() {
             onKeyDown={handleKeyDown}
             disabled={isCreatingTask}
             placeholder={
-              selectedList
-                ? `Search or press ↵ to add to ${selectedList.name}...`
-                : "Search or press ↵ to add task..."
+              !taskCreationEnabled
+                ? "Search tasks..."
+                : selectedList
+                  ? `Search or press ↵ to add to ${selectedList.name}...`
+                  : "Search or press ↵ to add task..."
             }
             className="h-7.5 w-full rounded-md border border-border/80 bg-background pl-8 pr-16 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-foreground focus:outline-none transition-all disabled:opacity-60"
           />
@@ -536,251 +817,333 @@ export function TaskList() {
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={handleCreateTask}
-              disabled={!taskInput.trim() || isCreatingTask}
-              className="flex h-5 items-center gap-1 rounded bg-secondary px-1.5 text-[10px] font-medium text-foreground hover:bg-foreground hover:text-background transition-all disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
-              title={`Press Enter to create "${taskInput.trim()}"`}
-            >
-              {isCreatingTask ? (
-                <Loader2 className="h-2.5 w-2.5 animate-spin" />
-              ) : (
-                <>
-                  <span>Add</span>
-                  <CornerDownLeft className="h-2.5 w-2.5 opacity-60" />
-                </>
-              )}
-            </button>
+            {taskCreationEnabled && (
+              <button
+                type="button"
+                onClick={handleCreateTask}
+                disabled={!taskInput.trim() || isCreatingTask}
+                className="flex h-5 items-center gap-1 rounded bg-secondary px-1.5 text-[10px] font-medium text-foreground hover:bg-foreground hover:text-background transition-all disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+                title={`Press Enter to create "${taskInput.trim()}"`}
+              >
+                {isCreatingTask ? (
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                ) : (
+                  <>
+                    <span>Add</span>
+                    <CornerDownLeft className="h-2.5 w-2.5 opacity-60" />
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
 
         {/* Task Destination & Priority Selector Row */}
-        <div className="flex items-center justify-between gap-1 px-1 text-[10px]">
-          {/* List Selector Dropdown */}
-          <div className="relative min-w-0 flex-1" ref={listPickerRef}>
-            <button
-              type="button"
-              onClick={() => {
-                setIsListPickerOpen(!isListPickerOpen);
-                setIsPriorityPickerOpen(false);
-                if (!isListPickerOpen && availableLists.length === 0 && token) {
-                  fetchLists();
-                }
-              }}
-              className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer max-w-full truncate"
-              title="Click to change destination ClickUp list"
-            >
-              <Folder className="h-3 w-3 shrink-0 text-amber-500/80" />
-              <span className="truncate font-medium">
-                {selectedList?.name || (token ? "Select list" : "Local Tasks")}
-              </span>
-              <ChevronDown className="h-2.5 w-2.5 shrink-0 opacity-60" />
-            </button>
+        {taskCreationEnabled && (
+          <div className="flex items-center justify-between gap-1 px-1 text-[10px]">
+            {/* List Selector Dropdown */}
+            <div className="relative min-w-0 flex-1" ref={listPickerRef}>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsListPickerOpen(!isListPickerOpen);
+                  setIsPriorityPickerOpen(false);
+                  if (!isListPickerOpen && availableLists.length === 0 && token) {
+                    fetchLists();
+                  }
+                }}
+                className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer max-w-full truncate"
+                title="Click to change destination ClickUp list"
+              >
+                <Folder className="h-3 w-3 shrink-0 text-amber-500/80" />
+                <span className="truncate font-medium">
+                  {selectedList?.name || (token ? "Select list" : "Local Tasks")}
+                </span>
+                <ChevronDown className="h-2.5 w-2.5 shrink-0 opacity-60" />
+              </button>
 
-            {/* List Picker Dropdown Menu */}
-            {isListPickerOpen && (
-              <div className="absolute top-full left-0 mt-1 w-64 max-h-56 overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg z-50 animate-in fade-in zoom-in-95 duration-100 flex flex-col">
-                <div className="flex items-center justify-between border-b border-border/60 px-2 py-1 mb-1 shrink-0">
-                  <span className="font-semibold text-[10.5px]">ClickUp Lists</span>
-                  {token && (
-                    <button
-                      type="button"
-                      onClick={() => fetchLists()}
-                      disabled={isLoadingLists}
-                      className="flex items-center gap-1 text-[9.5px] text-muted-foreground hover:text-foreground cursor-pointer disabled:opacity-50"
-                      title="Refresh lists from ClickUp"
-                    >
-                      <RefreshCw
-                        className={`h-2.5 w-2.5 ${isLoadingLists ? "animate-spin" : ""}`}
-                      />
-                      <span>Sync</span>
-                    </button>
-                  )}
-                </div>
-
-                {availableLists.length > 5 && (
-                  <div className="px-1.5 pb-1 shrink-0">
-                    <input
-                      type="text"
-                      value={listSearchQuery}
-                      onChange={(e) => setListSearchQuery(e.target.value)}
-                      placeholder="Search lists..."
-                      className="h-6 w-full rounded border border-border bg-background px-1.5 text-[10px] focus:outline-none"
-                    />
+              {/* List Picker Dropdown Menu */}
+              {isListPickerOpen && (
+                <div className="absolute top-full left-0 mt-1 w-64 max-h-56 overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg z-50 animate-in fade-in zoom-in-95 duration-100 flex flex-col">
+                  <div className="flex items-center justify-between border-b border-border/60 px-2 py-1 mb-1 shrink-0">
+                    <span className="font-semibold text-[10.5px]">ClickUp Lists</span>
+                    {token && (
+                      <button
+                        type="button"
+                        onClick={() => fetchLists()}
+                        disabled={isLoadingLists}
+                        className="flex items-center gap-1 text-[9.5px] text-muted-foreground hover:text-foreground cursor-pointer disabled:opacity-50"
+                        title="Refresh lists from ClickUp"
+                      >
+                        <RefreshCw
+                          className={`h-2.5 w-2.5 ${isLoadingLists ? "animate-spin" : ""}`}
+                        />
+                        <span>Sync</span>
+                      </button>
+                    )}
                   </div>
-                )}
 
-                <div className="overflow-y-auto flex-1 flex flex-col gap-0.5">
-                  {isLoadingLists && availableLists.length === 0 ? (
-                    <div className="flex items-center justify-center gap-1.5 py-4 text-xs text-muted-foreground">
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      <span>Fetching lists...</span>
+                  {availableLists.length > 5 && (
+                    <div className="px-1.5 pb-1 shrink-0">
+                      <input
+                        type="text"
+                        value={listSearchQuery}
+                        onChange={(e) => setListSearchQuery(e.target.value)}
+                        placeholder="Search lists..."
+                        className="h-6 w-full rounded border border-border bg-background px-1.5 text-[10px] focus:outline-none"
+                      />
                     </div>
-                  ) : filteredLists.length === 0 ? (
-                    <div className="py-3 px-2 text-center text-[10.5px] text-muted-foreground">
-                      {token ? "No lists found" : "Log in to view ClickUp lists"}
-                    </div>
-                  ) : (
-                    filteredLists.map((list) => {
-                      const isSelected = selectedList?.id === list.id;
-                      const pathInfo = [list.space?.name, list.folder?.name]
-                        .filter(Boolean)
-                        .join(" / ");
-
-                      return (
-                        <button
-                          key={list.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedListId(list.id);
-                            setIsListPickerOpen(false);
-                            toast.info(`Destination: ${list.name}`, { duration: 1500 });
-                          }}
-                          className={`flex items-center justify-between gap-1.5 rounded px-2 py-1 text-left text-[11px] transition-colors cursor-pointer ${
-                            isSelected
-                              ? "bg-primary text-primary-foreground font-medium"
-                              : "hover:bg-secondary text-foreground"
-                          }`}
-                        >
-                          <div className="flex flex-col min-w-0 flex-1">
-                            <span className="truncate">{list.name}</span>
-                            {pathInfo && (
-                              <span
-                                className={`text-[9px] truncate ${
-                                  isSelected
-                                    ? "text-primary-foreground/80"
-                                    : "text-muted-foreground"
-                                }`}
-                              >
-                                {pathInfo}
-                              </span>
-                            )}
-                          </div>
-                          {isSelected && <Check className="h-3 w-3 shrink-0" />}
-                        </button>
-                      );
-                    })
                   )}
+
+                  <div className="overflow-y-auto flex-1 flex flex-col gap-0.5">
+                    {isLoadingLists && availableLists.length === 0 ? (
+                      <div className="flex items-center justify-center gap-1.5 py-4 text-xs text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        <span>Fetching lists...</span>
+                      </div>
+                    ) : filteredLists.length === 0 ? (
+                      <div className="py-3 px-2 text-center text-[10.5px] text-muted-foreground">
+                        {token ? "No lists found" : "Log in to view ClickUp lists"}
+                      </div>
+                    ) : (
+                      filteredLists.map((list) => {
+                        const isSelected = selectedList?.id === list.id;
+                        const pathInfo = [list.space?.name, list.folder?.name]
+                          .filter(Boolean)
+                          .join(" / ");
+
+                        return (
+                          <button
+                            key={list.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedListId(list.id);
+                              setIsListPickerOpen(false);
+                              toast.info(`Destination: ${list.name}`, { duration: 1500 });
+                            }}
+                            className={`flex items-center justify-between gap-1.5 rounded px-2 py-1 text-left text-[11px] transition-colors cursor-pointer ${
+                              isSelected
+                                ? "bg-primary text-primary-foreground font-medium"
+                                : "hover:bg-secondary text-foreground"
+                            }`}
+                          >
+                            <div className="flex flex-col min-w-0 flex-1">
+                              <span className="truncate">{list.name}</span>
+                              {pathInfo && (
+                                <span
+                                  className={`text-[9px] truncate ${
+                                    isSelected
+                                      ? "text-primary-foreground/80"
+                                      : "text-muted-foreground"
+                                  }`}
+                                >
+                                  {pathInfo}
+                                </span>
+                              )}
+                            </div>
+                            {isSelected && <Check className="h-3 w-3 shrink-0" />}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
 
-          {/* Priority Toggle / Selector */}
-          <div className="relative shrink-0" ref={priorityPickerRef}>
-            <button
-              type="button"
-              onClick={() => {
-                setIsPriorityPickerOpen(!isPriorityPickerOpen);
-                setIsListPickerOpen(false);
-              }}
-              className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-              title="Set task priority"
-            >
-              <Flag className={`h-3 w-3 ${currentPriorityObj?.color || "text-muted-foreground"}`} />
-              <span className="font-medium">{currentPriorityObj?.label || "Normal"}</span>
-              <ChevronDown className="h-2.5 w-2.5 opacity-60" />
-            </button>
+            {/* Priority Toggle / Selector */}
+            <div className="relative shrink-0" ref={priorityPickerRef}>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPriorityPickerOpen(!isPriorityPickerOpen);
+                  setIsListPickerOpen(false);
+                }}
+                className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                title="Set task priority"
+              >
+                <Flag
+                  className={`h-3 w-3 ${currentPriorityObj?.color || "text-muted-foreground"}`}
+                />
+                <span className="font-medium">{currentPriorityObj?.label || "Normal"}</span>
+                <ChevronDown className="h-2.5 w-2.5 opacity-60" />
+              </button>
 
-            {/* Priority Picker Dropdown */}
-            {isPriorityPickerOpen && (
-              <div className="absolute top-full right-0 mt-1 w-28 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg z-50 animate-in fade-in zoom-in-95 duration-100 flex flex-col gap-0.5">
-                {PRIORITY_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.label}
-                    type="button"
-                    onClick={() => {
-                      setSelectedPriority(opt.value);
-                      setIsPriorityPickerOpen(false);
-                    }}
-                    className={`flex items-center gap-1.5 rounded px-2 py-1 text-left text-[10.5px] transition-colors cursor-pointer ${
-                      selectedPriority === opt.value
-                        ? "bg-secondary font-semibold text-foreground"
-                        : "hover:bg-secondary/60 text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Flag className={`h-2.5 w-2.5 ${opt.color}`} />
-                    <span>{opt.label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+              {/* Priority Picker Dropdown */}
+              {isPriorityPickerOpen && (
+                <div className="absolute top-full right-0 mt-1 w-28 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg z-50 animate-in fade-in zoom-in-95 duration-100 flex flex-col gap-0.5">
+                  {PRIORITY_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => {
+                        setSelectedPriority(opt.value);
+                        setIsPriorityPickerOpen(false);
+                      }}
+                      className={`flex items-center gap-1.5 rounded px-2 py-1 text-left text-[10.5px] transition-colors cursor-pointer ${
+                        selectedPriority === opt.value
+                          ? "bg-secondary font-semibold text-foreground"
+                          : "hover:bg-secondary/60 text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Flag className={`h-2.5 w-2.5 ${opt.color}`} />
+                      <span>{opt.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Task Rows List - Truly flex-1 scrollable */}
-      <div className="flex flex-col gap-1.5 flex-1 min-h-0 overflow-y-auto pr-0.5">
-        {isLoadingTasks && tasks.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-10 text-center text-xs text-muted-foreground">
-            <Loader2 className="mb-2 h-4 w-4 animate-spin text-foreground" />
-            <p>Syncing tasks from ClickUp...</p>
-          </div>
-        ) : filteredTasks.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 px-4 text-center text-xs text-muted-foreground">
-            {taskInput.trim() ? (
-              <>
-                <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-full bg-secondary/80 text-muted-foreground">
-                  <Search className="h-4 w-4" />
-                </div>
-                <p className="font-semibold text-foreground">No tasks matching "{taskInput}"</p>
-                <p className="mt-1 text-[11px] text-muted-foreground/80 max-w-[240px]">
-                  Press{" "}
-                  <kbd className="rounded border border-border bg-secondary px-1 py-0.5 text-[10px] font-mono">
-                    ↵ Enter
-                  </kbd>{" "}
-                  to create it in{" "}
-                  <span className="font-medium text-foreground">
-                    {selectedList?.name || "ClickUp"}
-                  </span>
-                </p>
-                <button
-                  type="button"
-                  onClick={handleCreateTask}
-                  disabled={isCreatingTask}
-                  className="mt-3 flex items-center gap-1.5 rounded-md bg-foreground px-3 py-1.5 text-xs font-semibold text-background hover:bg-foreground/90 transition-all cursor-pointer disabled:opacity-50"
-                >
-                  {isCreatingTask ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
+      <div className="relative flex flex-1 min-h-0 flex-col">
+        <div
+          ref={scrollRef}
+          onScroll={updateScrollEdges}
+          className="flex flex-col gap-1.5 flex-1 min-h-0 overflow-y-auto overscroll-contain pr-0.5 snap-y snap-proximity"
+        >
+          {isLoadingTasks && tasks.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-10 text-center text-xs text-muted-foreground">
+              <Loader2 className="mb-2 h-4 w-4 animate-spin text-foreground" />
+              <p>Syncing tasks from ClickUp...</p>
+            </div>
+          ) : filteredTasks.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 px-4 text-center text-xs text-muted-foreground">
+              {taskInput.trim() ? (
+                <>
+                  <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-full bg-secondary/80 text-muted-foreground">
+                    <Search className="h-4 w-4" />
+                  </div>
+                  <p className="font-semibold text-foreground">No tasks matching "{taskInput}"</p>
+                  {taskCreationEnabled ? (
                     <>
-                      <Plus className="h-3 w-3" />
-                      <span>Create "{taskInput}"</span>
+                      <p className="mt-1 text-[11px] text-muted-foreground/80 max-w-[240px]">
+                        Press{" "}
+                        <kbd className="rounded border border-border bg-secondary px-1 py-0.5 text-[10px] font-mono">
+                          ↵ Enter
+                        </kbd>{" "}
+                        to create it in{" "}
+                        <span className="font-medium text-foreground">
+                          {selectedList?.name || "ClickUp"}
+                        </span>
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleCreateTask}
+                        disabled={isCreatingTask}
+                        className="mt-3 flex items-center gap-1.5 rounded-md bg-foreground px-3 py-1.5 text-xs font-semibold text-background hover:bg-foreground/90 transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {isCreatingTask ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <>
+                            <Plus className="h-3 w-3" />
+                            <span>Create "{taskInput}"</span>
+                          </>
+                        )}
+                      </button>
                     </>
+                  ) : (
+                    <p className="mt-1 text-[11px] text-muted-foreground/80 max-w-[240px]">
+                      Task creation is turned off in Settings.
+                    </p>
                   )}
-                </button>
-              </>
-            ) : (
-              <>
-                <Clock className="mb-2 h-5 w-5 opacity-40 text-muted-foreground" />
-                <p className="font-semibold text-foreground">No tasks found</p>
-                {!token ? (
-                  <p className="mt-1 text-[11px] text-muted-foreground/80 max-w-[240px]">
-                    Connect your ClickUp account in Settings or type a task title above.
-                  </p>
-                ) : tasks.length > 0 && activeTab === "active" ? (
-                  <p className="mt-1 text-[11px] text-muted-foreground/80">
-                    You're all caught up! No active tasks pending.
-                  </p>
-                ) : (
-                  <p className="mt-1 text-[11px] text-muted-foreground/80">
-                    No tasks assigned to your user in this workspace.
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-        ) : (
-          filteredTasks.map((task) => (
-            <TaskRow
-              key={task.id}
-              task={task}
-              isCurrent={activeTaskId === task.id}
-              isTimerRunning={activeTaskId === task.id && isTimerRunning}
-              onToggleTimer={handleToggleTimer}
-            />
-          ))
+                </>
+              ) : (
+                <>
+                  <Clock className="mb-2 h-5 w-5 opacity-40 text-muted-foreground" />
+                  <p className="font-semibold text-foreground">No tasks found</p>
+                  {!token ? (
+                    <p className="mt-1 text-[11px] text-muted-foreground/80 max-w-[240px]">
+                      Connect your ClickUp account in Settings or type a task title above.
+                    </p>
+                  ) : tasks.length > 0 && activeTab === "active" ? (
+                    <p className="mt-1 text-[11px] text-muted-foreground/80">
+                      You're all caught up! No active tasks pending.
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-[11px] text-muted-foreground/80">
+                      No tasks assigned to your user in this workspace.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+            taskGroups.map((group) => {
+              const isCollapsed = collapsedTaskIds.has(group.root.id);
+              const hasSubtasks = group.descendants.length > 0;
+              const rootIsCurrent = activeTaskId === group.root.id;
+              const rootIsRunning = rootIsCurrent && isTimerRunning;
+
+              const rootRow = (
+                <TaskRow
+                  task={group.root}
+                  isCurrent={rootIsCurrent}
+                  isTimerRunning={rootIsRunning}
+                  onToggleTimer={handleToggleTimer}
+                  flat={hasSubtasks}
+                  isContext={group.rootIsContext}
+                  subtaskSummary={group.summary}
+                  isCollapsed={isCollapsed}
+                  onToggleCollapse={toggleCollapsed}
+                />
+              );
+
+              if (!hasSubtasks) {
+                return (
+                  <div key={group.root.id} className="snap-start scroll-mt-1">
+                    {rootRow}
+                  </div>
+                );
+              }
+
+              // Parent + subtasks read as one card: the group owns the border.
+              return (
+                <div
+                  key={group.root.id}
+                  className={`snap-start scroll-mt-1 overflow-hidden rounded-md border bg-card transition-all ${
+                    rootIsCurrent
+                      ? rootIsRunning
+                        ? "border-emerald-500/50 shadow-xs"
+                        : "border-amber-500/50 shadow-xs"
+                      : "border-border/70 hover:border-border"
+                  }`}
+                >
+                  {rootRow}
+                  {!isCollapsed && (
+                    <div className="border-t border-border/60 bg-secondary/20 py-1 pr-1 pl-2.5">
+                      <div className="flex flex-col gap-0.5 border-l border-border/60 pl-1.5">
+                        {group.descendants.map(({ task, depth }) => (
+                          <SubtaskRow
+                            key={task.id}
+                            task={task}
+                            depth={depth}
+                            isCurrent={activeTaskId === task.id}
+                            isTimerRunning={activeTaskId === task.id && isTimerRunning}
+                            isContext={!group.matchedIds.has(task.id)}
+                            onToggleTimer={handleToggleTimer}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Edge cues: a row cut off by the viewport should read as "scroll for
+            more" rather than as a broken row. Hairlines only — a fade band here
+            would paint over the very row it is meant to explain. */}
+        {canScrollUp && (
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-border/80" />
+        )}
+        {canScrollDown && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border/80" />
         )}
       </div>
     </div>
