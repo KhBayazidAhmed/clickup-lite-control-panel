@@ -1,12 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import {
-  ClickUpClient,
-  ClickUpList,
-  ClickUpTask,
-  ClickUpTimeEntry,
-  ClickUpUser,
-} from "../lib/clickup";
+import { ClickUpClient, ClickUpList, ClickUpTask, ClickUpUser } from "../lib/clickup";
 import { notify, setTrayTitle, setNativePinned } from "../lib/native";
 
 export interface ActiveTimer {
@@ -44,6 +38,31 @@ export interface PendingTimeEntry {
   note?: string;
 }
 
+export interface PendingTaskEntry {
+  localId: string;
+  name: string;
+  listId?: string;
+  priority?: number;
+  dueDate?: number;
+  description?: string;
+  createdAt: number;
+}
+
+export interface PendingStatusEntry {
+  id: string;
+  taskId: string;
+  status: string;
+  updatedAt: number;
+}
+
+export interface PendingStopEntry {
+  entryId: string;
+  start: number;
+  durationMs: number;
+  taskName: string;
+  note?: string;
+}
+
 interface AppState {
   // Auth & Workspace
   token: string | null;
@@ -53,6 +72,8 @@ interface AppState {
   customClientId: string;
   customClientSecret: string;
   setCustomOAuthCredentials: (clientId: string, clientSecret: string) => void;
+  isOnline: boolean;
+  setIsOnline: (online: boolean) => void;
 
   // Timer
   activeTimer: ActiveTimer | null;
@@ -66,10 +87,13 @@ interface AppState {
   recoveredTimer: RecoveredTimer | null;
   /** A ClickUp entry we failed to stop; retried on every sync so it can never
    *  keep running (and inflating) behind our back. */
+  pendingStopEntry: PendingStopEntry | null;
   pendingStopEntryId: string | null;
 
   // Offline Sync Queue
   offlineTimeQueue: PendingTimeEntry[];
+  offlineTaskQueue: PendingTaskEntry[];
+  offlineStatusQueue: PendingStatusEntry[];
   flushOfflineQueue: () => Promise<void>;
 
   // Pomodoro & Notifications
@@ -196,6 +220,8 @@ export const useAppStore = create<AppState>()(
       customClientSecret: "",
       setCustomOAuthCredentials: (customClientId, customClientSecret) =>
         set({ customClientId, customClientSecret }),
+      isOnline: typeof navigator !== "undefined" ? navigator.onLine : true,
+      setIsOnline: (isOnline) => set({ isOnline }),
 
       activeTimer: null,
       elapsedSeconds: 0,
@@ -205,9 +231,12 @@ export const useAppStore = create<AppState>()(
       lastSyncError: null,
       timerHeartbeat: null,
       recoveredTimer: null,
+      pendingStopEntry: null,
       pendingStopEntryId: null,
 
       offlineTimeQueue: [],
+      offlineTaskQueue: [],
+      offlineStatusQueue: [],
 
       isPomodoroActive: false,
       pomodoroSecondsRemaining: 25 * 60,
@@ -366,12 +395,13 @@ export const useAppStore = create<AppState>()(
 
         setTrayTitle("⏸ Paused");
 
-        if (token && teamId) {
+        if (token && teamId && activeTimer.entryId) {
           try {
             const client = new ClickUpClient(token);
             await client.stopTimeEntry(teamId);
           } catch (err) {
             console.warn("ClickUp API sync error on pauseTimer:", err);
+            set({ pendingStopEntryId: activeTimer.entryId });
           }
         }
       },
@@ -434,73 +464,200 @@ export const useAppStore = create<AppState>()(
 
         setTrayTitle(IDLE_TRAY_TITLE);
 
-        if (token && teamId && durationMs >= 1000) {
-          try {
-            const client = new ClickUpClient(token);
-            if (hadEntryId) {
-              await client.stopTimeEntry(teamId);
-              // Re-send the note in case it was typed before the entry existed
-              // or an earlier push failed.
-              if ((note || "").trim() && entryId) {
-                await client.updateTimeEntry(teamId, entryId, {
-                  description: entryDescription(taskName, note),
-                });
-              }
-            } else {
-              await client.createTimeEntry(teamId, {
-                start: startTime,
-                duration: durationMs,
+        if (durationMs < 1000) return;
+
+        const enqueueOfflineTime = () => {
+          const pendingEntry: PendingTimeEntry = {
+            id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            taskId,
+            taskName,
+            start: startTime,
+            durationMs,
+            createdAt: Date.now(),
+            note,
+          };
+          set((state) => ({
+            offlineTimeQueue: [...state.offlineTimeQueue, pendingEntry],
+          }));
+          notify(
+            "Saved Offline",
+            `"${taskName}" (${formatTime(elapsedSeconds)}) will sync when connection returns.`,
+          );
+        };
+
+        if (!token || !teamId) {
+          enqueueOfflineTime();
+          return;
+        }
+
+        try {
+          const client = new ClickUpClient(token);
+          if (hadEntryId && entryId) {
+            await client.stopTimeEntry(teamId);
+            // Re-send the note in case it was typed before the entry existed
+            // or an earlier push failed.
+            if ((note || "").trim()) {
+              await client.updateTimeEntry(teamId, entryId, {
                 description: entryDescription(taskName, note),
-                taskId,
               });
             }
-            await get().syncTodayTime();
-          } catch (err) {
-            // ClickUp already holds this entry and it is still running there.
-            // Queueing a copy would double-log, so retry the stop instead.
-            if (hadEntryId && entryId) {
-              set({ pendingStopEntryId: entryId });
-              console.warn("Failed to stop the ClickUp entry; will retry on next sync:", err);
-              notify(
-                "Couldn't Stop Timer",
-                `"${taskName}" is still running in ClickUp. Retrying automatically.`,
-              );
-              return;
-            }
-
-            console.warn("Failed to log timer online. Enqueuing for offline sync:", err);
-            const pendingEntry: PendingTimeEntry = {
-              id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-              taskId,
-              taskName,
+          } else {
+            await client.createTimeEntry(teamId, {
               start: startTime,
-              durationMs,
-              createdAt: Date.now(),
-              note,
-            };
-            set((state) => ({
-              offlineTimeQueue: [...state.offlineTimeQueue, pendingEntry],
-            }));
-            notify(
-              "Saved Offline",
-              `"${taskName}" (${formatTime(elapsedSeconds)}) will sync when connection returns.`,
-            );
+              duration: durationMs,
+              description: entryDescription(taskName, note),
+              taskId,
+            });
           }
+          await get().syncTodayTime();
+        } catch (err) {
+          set({ isOnline: false });
+          // ClickUp already holds this entry and it is still running there.
+          if (hadEntryId && entryId) {
+            set({
+              pendingStopEntry: {
+                entryId,
+                start: startTime,
+                durationMs,
+                taskName,
+                note,
+              },
+              pendingStopEntryId: entryId,
+            });
+            console.warn("Failed to stop the ClickUp entry; will retry on next sync:", err);
+            notify(
+              "Timer Stopped Offline",
+              `"${taskName}" will finish syncing when connection returns.`,
+            );
+            return;
+          }
+
+          console.warn("Failed to log timer online. Enqueuing for offline sync:", err);
+          enqueueOfflineTime();
         }
       },
 
       flushOfflineQueue: async () => {
-        const { token, teamId, offlineTimeQueue } = get();
-        if (!token || !teamId || offlineTimeQueue.length === 0) return;
+        const {
+          token,
+          teamId,
+          offlineTimeQueue,
+          offlineTaskQueue,
+          offlineStatusQueue,
+          pendingStopEntry,
+        } = get();
+
+        const totalPending =
+          (offlineTimeQueue?.length || 0) +
+          (offlineTaskQueue?.length || 0) +
+          (offlineStatusQueue?.length || 0) +
+          (pendingStopEntry ? 1 : 0);
+
+        if (!token || !teamId || totalPending === 0) return;
 
         if (flushOfflinePromise) return flushOfflinePromise;
 
         flushOfflinePromise = (async () => {
           const client = new ClickUpClient(token);
-          const remaining: PendingTimeEntry[] = [];
-          let syncedCount = 0;
 
-          for (const item of offlineTimeQueue) {
+          // 1. Settle pending stop entry if one was interrupted while offline
+          const currentStopEntry = get().pendingStopEntry;
+          if (currentStopEntry) {
+            try {
+              await client.stopTimeEntry(teamId);
+              if (
+                currentStopEntry.start &&
+                currentStopEntry.durationMs &&
+                currentStopEntry.durationMs >= 1000
+              ) {
+                await client.updateTimeEntry(teamId, currentStopEntry.entryId, {
+                  start: currentStopEntry.start,
+                  duration: currentStopEntry.durationMs,
+                  description: entryDescription(currentStopEntry.taskName, currentStopEntry.note),
+                });
+              }
+              set({ pendingStopEntry: null, pendingStopEntryId: null });
+            } catch (err) {
+              console.warn("Failed to settle pending stop entry, retaining for next attempt:", err);
+            }
+          }
+
+          // 2. Flush offline tasks first so remapped task IDs can update time & status queues
+          const currentTasksQueue = get().offlineTaskQueue || [];
+          const remainingTasks: PendingTaskEntry[] = [];
+          const localToRemoteTaskMap = new Map<string, string>();
+          let syncedTasksCount = 0;
+
+          for (const taskItem of currentTasksQueue) {
+            try {
+              let targetListId = taskItem.listId || get().selectedListId;
+              if (!targetListId) {
+                const lists = get().availableLists;
+                if (lists.length > 0 && lists[0]) {
+                  targetListId = lists[0].id;
+                }
+              }
+              if (!targetListId) {
+                const fetchedLists = await client.getLists(teamId);
+                if (fetchedLists.length > 0 && fetchedLists[0]) {
+                  targetListId = fetchedLists[0].id;
+                }
+              }
+
+              if (!targetListId) {
+                remainingTasks.push(taskItem);
+                continue;
+              }
+
+              const created = await client.createTask(targetListId, {
+                name: taskItem.name,
+                description: taskItem.description,
+                priority: taskItem.priority,
+                dueDate: taskItem.dueDate,
+              });
+
+              localToRemoteTaskMap.set(taskItem.localId, created.id);
+              syncedTasksCount++;
+
+              set((state) => ({
+                tasks: state.tasks.map((t) => (t.id === taskItem.localId ? created : t)),
+                activeTimer:
+                  state.activeTimer && state.activeTimer.taskId === taskItem.localId
+                    ? { ...state.activeTimer, taskId: created.id }
+                    : state.activeTimer,
+              }));
+            } catch (err) {
+              console.warn("Failed to flush offline task, retaining:", err);
+              remainingTasks.push(taskItem);
+            }
+          }
+
+          set({ offlineTaskQueue: remainingTasks });
+
+          // Remap localIds to real ClickUp IDs in time queue & status queue
+          if (localToRemoteTaskMap.size > 0) {
+            set((state) => ({
+              offlineTimeQueue: state.offlineTimeQueue.map((item) => {
+                if (item.taskId && localToRemoteTaskMap.has(item.taskId)) {
+                  return { ...item, taskId: localToRemoteTaskMap.get(item.taskId)! };
+                }
+                return item;
+              }),
+              offlineStatusQueue: (state.offlineStatusQueue || []).map((item) => {
+                if (localToRemoteTaskMap.has(item.taskId)) {
+                  return { ...item, taskId: localToRemoteTaskMap.get(item.taskId)! };
+                }
+                return item;
+              }),
+            }));
+          }
+
+          // 3. Flush offline time entries
+          const currentTimeQueue = get().offlineTimeQueue || [];
+          const remainingTime: PendingTimeEntry[] = [];
+          let syncedTimeCount = 0;
+
+          for (const item of currentTimeQueue) {
             try {
               await client.createTimeEntry(teamId, {
                 start: item.start,
@@ -508,21 +665,53 @@ export const useAppStore = create<AppState>()(
                 description: entryDescription(item.taskName, item.note),
                 taskId: item.taskId,
               });
-              syncedCount++;
+              syncedTimeCount++;
             } catch (err) {
-              console.warn("Failed to flush offline entry, retaining in queue:", err);
-              remaining.push(item);
+              console.warn("Failed to flush offline time entry, retaining in queue:", err);
+              remainingTime.push(item);
             }
           }
 
-          set({ offlineTimeQueue: remaining });
+          set({ offlineTimeQueue: remainingTime });
 
-          if (syncedCount > 0) {
-            notify(
-              "Offline Time Synced",
-              `Successfully uploaded ${syncedCount} offline session(s) to ClickUp.`,
-            );
+          // 4. Flush offline status updates
+          const currentStatusQueue = get().offlineStatusQueue || [];
+          const remainingStatus: PendingStatusEntry[] = [];
+          let syncedStatusCount = 0;
+
+          for (const statusItem of currentStatusQueue) {
+            if (statusItem.taskId.startsWith("local-")) {
+              remainingStatus.push(statusItem);
+              continue;
+            }
+            try {
+              await client.updateTaskStatus(statusItem.taskId, statusItem.status);
+              syncedStatusCount++;
+            } catch (err) {
+              console.warn("Failed to flush offline status update:", err);
+              remainingStatus.push(statusItem);
+            }
+          }
+
+          set({ offlineStatusQueue: remainingStatus });
+
+          const totalSynced = syncedTimeCount + syncedTasksCount + syncedStatusCount;
+          if (totalSynced > 0) {
+            set({ isOnline: true });
+            const parts: string[] = [];
+            if (syncedTimeCount > 0) {
+              parts.push(`${syncedTimeCount} time session${syncedTimeCount > 1 ? "s" : ""}`);
+            }
+            if (syncedTasksCount > 0) {
+              parts.push(`${syncedTasksCount} task${syncedTasksCount > 1 ? "s" : ""}`);
+            }
+            if (syncedStatusCount > 0) {
+              parts.push(`${syncedStatusCount} status update${syncedStatusCount > 1 ? "s" : ""}`);
+            }
+
+            notify("Offline Work Synced", `Uploaded ${parts.join(", ")} to ClickUp.`);
             get().syncTodayTime();
+            get().fetchTasks();
           }
         })().finally(() => {
           flushOfflinePromise = null;
@@ -558,11 +747,10 @@ export const useAppStore = create<AppState>()(
           const nextPomo = pomodoroSecondsRemaining - 1;
           set({ pomodoroSecondsRemaining: nextPomo });
 
-          if (nextPomo === 0) {
-            set({ isPomodoroActive: false });
-            if (notificationsEnabled) {
-              notify("Pomodoro Complete!", "Great focus session. Time for a 5-minute break.");
-            }
+          // Timer finished
+          if (nextPomo === 0 && notificationsEnabled) {
+            notify("Pomodoro Complete!", "Great job! Take a short break.");
+            setTrayTitle("🎉 Break");
           }
         }
       },
@@ -644,6 +832,7 @@ export const useAppStore = create<AppState>()(
           notify("Time Logged", `"${taskName}" (${formatTime(trackedSeconds)}) saved to ClickUp.`);
         } catch (err) {
           console.warn("Failed to log recovered time online:", err);
+          set({ isOnline: false });
           enqueueOffline();
         }
       },
@@ -656,14 +845,12 @@ export const useAppStore = create<AppState>()(
         set({ recoveredTimer: null });
         if (!token || !teamId || !entryId) return;
 
-        // If the abandoned entry is still open on ClickUp, discarding locally is
-        // not enough — it would keep running there forever.
         try {
           const client = new ClickUpClient(token);
           const serverEntry = await client.getCurrentTimeEntry(teamId);
           if (serverEntry && serverEntry.id === entryId) {
-            await client.stopTimeEntry(teamId);
-            await client.deleteTimeEntry(teamId, entryId);
+            await client.stopTimeEntry(teamId).catch(() => {});
+            await client.deleteTimeEntry(teamId, entryId).catch(() => {});
             await get().syncTodayTime();
           }
         } catch (err) {
@@ -682,29 +869,27 @@ export const useAppStore = create<AppState>()(
         syncTimerPromise = (async () => {
           try {
             const client = new ClickUpClient(token);
+            const entry = await client.getCurrentTimeEntry(teamId);
+            const serverIsRunning = entry !== null && (!entry.stop || Number(entry.stop) === 0);
 
-            let entry: ClickUpTimeEntry | null = null;
-            try {
-              entry = await client.getCurrentTimeEntry(teamId);
-            } catch (err) {
-              // We could not ask ClickUp. "Unknown" is not "nothing is running",
-              // so leave local state intact instead of deleting a live timer.
-              console.warn("Could not reach ClickUp to sync the timer; keeping local state:", err);
-              return;
-            }
-
-            const serverIsRunning = entry !== null && (!entry.stop || Number(entry.duration) < 0);
-
-            // Settle any stop we still owe ClickUp before reading the server as
-            // truth — an entry we failed to stop keeps accruing time there.
+            // Retry any stop that failed earlier (e.g. paused/stopped while offline).
             // Only stop it if it is still the running one, so a timer started
             // since then is never cut short.
             const stuckEntryId = get().pendingStopEntryId;
-            if (stuckEntryId) {
-              if (entry && serverIsRunning && entry.id === stuckEntryId) {
+            const stuckEntry = get().pendingStopEntry;
+            const targetId = stuckEntry?.entryId || stuckEntryId;
+            if (targetId) {
+              if (entry && serverIsRunning && entry.id === targetId) {
                 try {
                   await client.stopTimeEntry(teamId);
-                  set({ pendingStopEntryId: null });
+                  if (stuckEntry?.start && stuckEntry.durationMs && stuckEntry.durationMs >= 1000) {
+                    await client.updateTimeEntry(teamId, targetId, {
+                      start: stuckEntry.start,
+                      duration: stuckEntry.durationMs,
+                      description: entryDescription(stuckEntry.taskName, stuckEntry.note),
+                    });
+                  }
+                  set({ pendingStopEntryId: null, pendingStopEntry: null });
                   await get().syncTodayTime();
                 } catch (err) {
                   console.warn("Retrying a pending timer stop failed:", err);
@@ -712,7 +897,7 @@ export const useAppStore = create<AppState>()(
                 return;
               }
               // It is no longer running, so nothing is owed.
-              set({ pendingStopEntryId: null });
+              set({ pendingStopEntryId: null, pendingStopEntry: null });
             }
 
             const current = get().activeTimer;
@@ -850,7 +1035,7 @@ export const useAppStore = create<AppState>()(
                   totalSeconds += Math.floor(overlapMs / 1000);
                 }
               }
-              set({ todayLoggedSeconds: totalSeconds });
+              set({ todayLoggedSeconds: totalSeconds, isOnline: true });
             }
           } catch (err) {
             console.warn("Failed to sync today's time from ClickUp:", err);
@@ -898,6 +1083,7 @@ export const useAppStore = create<AppState>()(
                 availableLists: merged,
                 selectedListId,
                 isLoadingLists: false,
+                isOnline: true,
               };
             });
 
@@ -934,6 +1120,7 @@ export const useAppStore = create<AppState>()(
               }
               get().setTeam(first.id, first.name);
             } catch (err) {
+              set({ isOnline: false });
               return {
                 ok: false,
                 error: err instanceof Error ? err.message : "Could not reach ClickUp.",
@@ -941,14 +1128,21 @@ export const useAppStore = create<AppState>()(
             }
           }
 
+          // Flush any offline work first
+          await get()
+            .flushOfflineQueue()
+            .catch((err) => {
+              console.warn("flushOfflineQueue error during syncAll:", err);
+            });
+
           await Promise.allSettled([
-            get().flushOfflineQueue(),
             get().fetchTasks(),
             get().fetchLists(),
             get().syncCurrentTimer(),
             get().syncTodayTime(),
           ]);
 
+          set({ isOnline: true });
           const error = get().lastSyncError;
           return error ? { ok: false, error } : { ok: true };
         } finally {
@@ -997,12 +1191,29 @@ export const useAppStore = create<AppState>()(
               const mergedLists = Array.from(listMap.values());
               const selectedListId = state.selectedListId || mergedLists[0]?.id || null;
 
+              // Preserve unsynced local tasks
+              const localTasks = (state.tasks || []).filter((t) => t.id.startsWith("local-"));
+              const allTasks = [...localTasks, ...tasks];
+
+              // Reapply pending status updates from offlineStatusQueue
+              const pendingStatuses = new Map(
+                (state.offlineStatusQueue || []).map((s) => [s.taskId, s.status]),
+              );
+              const finalTasks = allTasks.map((t) => {
+                const pendingStatus = pendingStatuses.get(t.id);
+                if (pendingStatus) {
+                  return { ...t, status: { ...t.status, status: pendingStatus } };
+                }
+                return t;
+              });
+
               return {
-                tasks,
+                tasks: finalTasks,
                 availableLists: mergedLists,
                 selectedListId,
                 isLoadingTasks: false,
                 lastTaskPollTime: Date.now(),
+                isOnline: true,
               };
             });
 
@@ -1012,6 +1223,7 @@ export const useAppStore = create<AppState>()(
             console.error("Failed to fetch tasks:", err);
             set({
               isLoadingTasks: false,
+              isOnline: false,
               lastSyncError: err instanceof Error ? err.message : "Failed to fetch tasks",
             });
           } finally {
@@ -1095,7 +1307,7 @@ export const useAppStore = create<AppState>()(
             // Establish baseline on first run without spamming alerts
             if (!taskBaselineEstablished) {
               taskBaselineEstablished = true;
-              set({ tasks: freshTasks, lastTaskPollTime: now });
+              set({ tasks: freshTasks, lastTaskPollTime: now, isOnline: true });
               return;
             }
 
@@ -1135,7 +1347,21 @@ export const useAppStore = create<AppState>()(
               }
             }
 
-            set({ tasks: freshTasks, lastTaskPollTime: now });
+            // Preserve unsynced local tasks and pending statuses
+            const localTasks = (currentTasks || []).filter((t) => t.id.startsWith("local-"));
+            const allTasks = [...localTasks, ...freshTasks];
+            const pendingStatuses = new Map(
+              (get().offlineStatusQueue || []).map((s) => [s.taskId, s.status]),
+            );
+            const finalTasks = allTasks.map((t) => {
+              const pendingStatus = pendingStatuses.get(t.id);
+              if (pendingStatus) {
+                return { ...t, status: { ...t.status, status: pendingStatus } };
+              }
+              return t;
+            });
+
+            set({ tasks: finalTasks, lastTaskPollTime: now, isOnline: true });
           } catch (err) {
             console.warn("Failed to poll task updates from ClickUp:", err);
           } finally {
@@ -1147,43 +1373,70 @@ export const useAppStore = create<AppState>()(
       },
 
       createTask: async ({ name, listId, priority, dueDate, description }) => {
-        const { token, teamId, user, selectedListId, availableLists, tasks, taskCreationEnabled } =
-          get();
+        const { token, teamId, user, selectedListId, availableLists, taskCreationEnabled } = get();
 
         if (!taskCreationEnabled) {
           throw new Error("Task creation is disabled in Settings.");
         }
 
-        // If offline / no token connected, save locally
-        if (!token || !teamId) {
-          const newTask: ClickUpTask = {
-            id: `local-${Date.now()}`,
+        const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        let targetListId = listId || selectedListId;
+        if (!targetListId && availableLists.length > 0 && availableLists[0]) {
+          targetListId = availableLists[0].id;
+        }
+        const targetListObj = availableLists.find((l) => l.id === targetListId);
+
+        const localTask: ClickUpTask = {
+          id: localId,
+          name,
+          status: { status: "to do", color: "#9ca3af", type: "open", orderindex: 0 },
+          priority: priority
+            ? {
+                priority:
+                  priority === 1
+                    ? "urgent"
+                    : priority === 2
+                      ? "high"
+                      : priority === 3
+                        ? "normal"
+                        : "low",
+                color:
+                  priority === 1
+                    ? "#f43f5e"
+                    : priority === 2
+                      ? "#f59e0b"
+                      : priority === 3
+                        ? "#0ea5e9"
+                        : "#9ca3af",
+              }
+            : null,
+          due_date: dueDate ? String(dueDate) : null,
+          list: targetListObj
+            ? { id: targetListObj.id, name: targetListObj.name }
+            : { id: "local", name: "Local Tasks" },
+        };
+
+        const enqueueOfflineTask = () => {
+          const pendingTask: PendingTaskEntry = {
+            localId,
             name,
-            status: { status: "to do", color: "#9ca3af", type: "open", orderindex: 0 },
-            priority: priority
-              ? {
-                  priority:
-                    priority === 1
-                      ? "urgent"
-                      : priority === 2
-                        ? "high"
-                        : priority === 3
-                          ? "normal"
-                          : "low",
-                  color:
-                    priority === 1
-                      ? "#f43f5e"
-                      : priority === 2
-                        ? "#f59e0b"
-                        : priority === 3
-                          ? "#0ea5e9"
-                          : "#9ca3af",
-                }
-              : null,
-            list: { id: "local", name: "Local Tasks" },
+            listId: targetListId || undefined,
+            priority,
+            dueDate,
+            description,
+            createdAt: Date.now(),
           };
-          set((state) => ({ tasks: [newTask, ...state.tasks] }));
-          return newTask;
+          set((state) => ({
+            tasks: [localTask, ...state.tasks],
+            offlineTaskQueue: [...(state.offlineTaskQueue || []), pendingTask],
+          }));
+          notify("Task Saved Offline", `"${name}" will sync when connection returns.`);
+          return localTask;
+        };
+
+        // If offline / no token connected, save locally and enqueue
+        if (!token || !teamId) {
+          return enqueueOfflineTask();
         }
 
         set({ isCreatingTask: true });
@@ -1191,26 +1444,15 @@ export const useAppStore = create<AppState>()(
           const client = new ClickUpClient(token);
 
           // Find target list
-          let targetListId = listId || selectedListId;
-
           if (!targetListId) {
-            if (availableLists.length > 0 && availableLists[0]) {
-              targetListId = availableLists[0].id;
-            } else if (tasks.length > 0 && tasks[0]?.list?.id) {
-              targetListId = tasks[0].list.id;
-            } else {
-              // Try to fetch lists on the fly
-              const lists = await get().fetchLists();
-              if (lists.length > 0 && lists[0]) {
-                targetListId = lists[0].id;
-              }
+            const lists = await get().fetchLists();
+            if (lists.length > 0 && lists[0]) {
+              targetListId = lists[0].id;
             }
           }
 
           if (!targetListId) {
-            throw new Error(
-              "No ClickUp list found in this workspace. Please create a list in ClickUp first.",
-            );
+            return enqueueOfflineTask();
           }
 
           const created = await client.createTask(targetListId, {
@@ -1222,7 +1464,6 @@ export const useAppStore = create<AppState>()(
           });
 
           // Ensure task has list metadata if missing from raw response
-          const targetListObj = availableLists.find((l) => l.id === targetListId);
           const fullTask: ClickUpTask = {
             ...created,
             list:
@@ -1233,9 +1474,14 @@ export const useAppStore = create<AppState>()(
           set((state) => ({
             tasks: [fullTask, ...state.tasks.filter((t) => t.id !== fullTask.id)],
             selectedListId: targetListId,
+            isOnline: true,
           }));
 
           return fullTask;
+        } catch (err) {
+          console.warn("Failed to create task online, saving offline:", err);
+          set({ isOnline: false });
+          return enqueueOfflineTask();
         } finally {
           set({ isCreatingTask: false });
         }
@@ -1269,12 +1515,36 @@ export const useAppStore = create<AppState>()(
           await get().stopTimer();
         }
 
-        if (token && !taskId.startsWith("local-") && !taskId.startsWith("demo-")) {
+        const enqueueOfflineStatus = () => {
+          set((state) => {
+            const filtered = (state.offlineStatusQueue || []).filter((s) => s.taskId !== taskId);
+            return {
+              offlineStatusQueue: [
+                ...filtered,
+                { id: `status-${Date.now()}`, taskId, status: newStatus, updatedAt: Date.now() },
+              ],
+            };
+          });
+        };
+
+        if (token && !taskId.startsWith("demo-")) {
+          if (taskId.startsWith("local-")) {
+            enqueueOfflineStatus();
+            return;
+          }
           try {
             const client = new ClickUpClient(token);
             await client.updateTaskStatus(taskId, newStatus);
+            set((state) => ({
+              offlineStatusQueue: (state.offlineStatusQueue || []).filter(
+                (s) => s.taskId !== taskId,
+              ),
+              isOnline: true,
+            }));
           } catch (err) {
-            console.error("Failed to update status on ClickUp:", err);
+            console.warn("Failed to update status on ClickUp online, queuing offline:", err);
+            set({ isOnline: false });
+            enqueueOfflineStatus();
           }
         }
       },
@@ -1306,9 +1576,12 @@ export const useAppStore = create<AppState>()(
         activeTimer: state.activeTimer,
         timerHeartbeat: state.timerHeartbeat,
         recoveredTimer: state.recoveredTimer,
+        pendingStopEntry: state.pendingStopEntry || null,
         pendingStopEntryId: state.pendingStopEntryId,
         todayLoggedSeconds: state.todayLoggedSeconds,
         offlineTimeQueue: state.offlineTimeQueue || [],
+        offlineTaskQueue: state.offlineTaskQueue || [],
+        offlineStatusQueue: state.offlineStatusQueue || [],
         tasks: (state.tasks || []).filter((t) => !t.id.startsWith("demo-")),
         subtasksByParent: state.subtasksByParent || {},
         availableLists: state.availableLists || [],
@@ -1321,9 +1594,15 @@ export const useAppStore = create<AppState>()(
             setNativePinned(state.isPinned);
           }
 
-          // Ensure offlineTimeQueue is initialized as array
+          // Ensure offline queues are initialized as arrays
           if (!Array.isArray(state.offlineTimeQueue)) {
             state.offlineTimeQueue = [];
+          }
+          if (!Array.isArray(state.offlineTaskQueue)) {
+            state.offlineTaskQueue = [];
+          }
+          if (!Array.isArray(state.offlineStatusQueue)) {
+            state.offlineStatusQueue = [];
           }
 
           if (typeof state.confirmTaskCompletion !== "boolean") {

@@ -21,7 +21,7 @@ export async function getAppVersion(): Promise<string> {
       console.warn("Failed to get native app version:", err);
     }
   }
-  return "0.1.1";
+  return "0.1.2";
 }
 
 export async function checkAppUpdate(): Promise<{

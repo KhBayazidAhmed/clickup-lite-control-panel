@@ -19,13 +19,24 @@ export function ControlPanelHeader({
   const user = useAppStore((s) => s.user);
   const teamName = useAppStore((s) => s.teamName);
   const token = useAppStore((s) => s.token);
+  const isOnline = useAppStore((s) => s.isOnline);
   const isPinned = useAppStore((s) => s.isPinned);
   const setIsPinned = useAppStore((s) => s.setIsPinned);
   const storeSyncAll = useAppStore((s) => s.syncAll);
   const isLoadingTasks = useAppStore((s) => s.isLoadingTasks);
   const storeIsSyncing = useAppStore((s) => s.isSyncing);
   const availableUpdateVersion = useAppStore((s) => s.availableUpdateVersion);
+  const offlineTimeQueue = useAppStore((s) => s.offlineTimeQueue);
+  const offlineTaskQueue = useAppStore((s) => s.offlineTaskQueue);
+  const offlineStatusQueue = useAppStore((s) => s.offlineStatusQueue);
+  const pendingStopEntry = useAppStore((s) => s.pendingStopEntry);
   const { theme, setTheme } = useTheme();
+
+  const pendingCount =
+    (offlineTimeQueue?.length || 0) +
+    (offlineTaskQueue?.length || 0) +
+    (offlineStatusQueue?.length || 0) +
+    (pendingStopEntry ? 1 : 0);
 
   const handleSync =
     onSync ||
@@ -87,17 +98,24 @@ export function ControlPanelHeader({
           </span>
           <span className="text-[10px] text-muted-foreground/60">•</span>
           <div className="flex items-center gap-1 text-[11px] text-muted-foreground truncate font-medium">
-            {token ? (
+            {token && isOnline ? (
               <>
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
                 <span className="truncate max-w-[110px]">
                   {teamName || user?.username || "Workspace"}
                 </span>
+                {pendingCount > 0 && (
+                  <span className="ml-0.5 rounded-full bg-amber-500/20 px-1 py-0.2 text-[9px] font-semibold text-amber-500">
+                    {pendingCount}
+                  </span>
+                )}
               </>
             ) : (
               <>
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-500 shrink-0" />
-                <span className="truncate">Offline</span>
+                <span className="truncate">
+                  {pendingCount > 0 ? `Offline (${pendingCount})` : "Offline"}
+                </span>
               </>
             )}
           </div>
@@ -111,10 +129,17 @@ export function ControlPanelHeader({
             type="button"
             onClick={handleSync}
             disabled={syncing}
-            title="Sync Tasks"
-            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-50"
+            title={
+              pendingCount > 0
+                ? `Sync Tasks & Offline Queue (${pendingCount} pending)`
+                : "Sync Tasks"
+            }
+            className="relative flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin text-primary" : ""}`} />
+            {pendingCount > 0 && !syncing && (
+              <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2 rounded-full bg-amber-500 ring-1 ring-background" />
+            )}
           </button>
         )}
 

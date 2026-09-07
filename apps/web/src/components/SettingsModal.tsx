@@ -69,11 +69,20 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     notificationsEnabled,
     setNotificationsEnabled,
     offlineTimeQueue,
+    offlineTaskQueue,
+    offlineStatusQueue,
+    pendingStopEntry,
     flushOfflineQueue,
     customClientId,
     customClientSecret,
     setCustomOAuthCredentials,
   } = useAppStore();
+
+  const totalPendingOffline =
+    (offlineTimeQueue?.length || 0) +
+    (offlineTaskQueue?.length || 0) +
+    (offlineStatusQueue?.length || 0) +
+    (pendingStopEntry ? 1 : 0);
 
   const [authMethod, setAuthMethod] = useState<"oauth" | "token">("oauth");
   const [personalTokenInput, setPersonalTokenInput] = useState(token || "");
@@ -96,7 +105,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   // Auto-updater state
   const setAvailableUpdateVersion = useAppStore((s) => s.setAvailableUpdateVersion);
-  const [appVersion, setAppVersion] = useState("0.1.0");
+  const [appVersion, setAppVersion] = useState("0.1.2");
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -247,10 +256,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   };
 
   const handleFlushOffline = async () => {
-    if (offlineTimeQueue.length === 0) return;
+    if (totalPendingOffline === 0) return;
     setIsFlushingOffline(true);
     try {
       await flushOfflineQueue();
+      await syncAll();
       setStatusMessage({
         type: "success",
         text: "Offline queue successfully synced to ClickUp!",
@@ -259,7 +269,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       const msg = err instanceof Error ? err.message : "Sync failed";
       setStatusMessage({
         type: "error",
-        text: `Failed to flush offline queue: ${msg}`,
+        text: `Failed to sync offline queue: ${msg}`,
       });
     } finally {
       setIsFlushingOffline(false);
@@ -674,23 +684,33 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           <div className="rounded-lg border border-border/80 bg-muted/20 p-2.5 flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 font-medium text-foreground">
-                {offlineTimeQueue.length > 0 ? (
+                {totalPendingOffline > 0 ? (
                   <CloudOff className="h-3.5 w-3.5 text-amber-500" />
                 ) : (
                   <CloudCheck className="h-3.5 w-3.5 text-emerald-500" />
                 )}
-                <span>Offline Time Queue</span>
+                <span>Offline Work Queue</span>
               </div>
               <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
-                {offlineTimeQueue.length} pending
+                {totalPendingOffline} pending
               </span>
             </div>
             <p className="text-[10px] text-muted-foreground leading-normal">
-              {offlineTimeQueue.length > 0
-                ? "Time tracked while disconnected is held here safely and flushed automatically."
-                : "All time tracking entries are fully synced with ClickUp servers."}
+              {totalPendingOffline > 0 ? (
+                <>
+                  Work saved offline:
+                  {offlineTimeQueue.length > 0 && ` ${offlineTimeQueue.length} time entry(s)`}
+                  {offlineTaskQueue.length > 0 && ` ${offlineTaskQueue.length} task(s)`}
+                  {offlineStatusQueue.length > 0 &&
+                    ` ${offlineStatusQueue.length} status change(s)`}
+                  {pendingStopEntry && " 1 timer stop"}. Automatically uploaded when connection
+                  returns.
+                </>
+              ) : (
+                "All tasks and time tracking entries are fully synced with ClickUp servers."
+              )}
             </p>
-            {offlineTimeQueue.length > 0 && (
+            {totalPendingOffline > 0 && (
               <Button
                 type="button"
                 onClick={handleFlushOffline}

@@ -16,6 +16,7 @@ import {
   ChevronDown,
   Flag,
   RefreshCw,
+  CloudOff,
 } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { ClickUpTask } from "../lib/clickup";
@@ -78,6 +79,12 @@ function formatDueDate(
 }
 
 function openTaskInClickUp(taskId: string) {
+  if (taskId.startsWith("local-")) {
+    toast.info("Task was created offline and hasn't synced to ClickUp yet.", {
+      duration: 2500,
+    });
+    return;
+  }
   openExternalUrl(`https://app.clickup.com/t/${taskId}`);
   toast.success("Opening in ClickUp...", { duration: 1500 });
 }
@@ -115,6 +122,7 @@ const TaskRow = React.memo(function TaskRow({
   const priorityKey = task.priority?.priority?.toLowerCase();
   const priorityInfo = priorityKey ? PRIORITY_CONFIG[priorityKey] : null;
   const dueInfo = formatDueDate(task.due_date);
+  const isLocal = task.id.startsWith("local-");
 
   const handleOpenClickUp = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -175,6 +183,15 @@ const TaskRow = React.memo(function TaskRow({
           >
             {task.name}
           </span>
+          {isLocal && (
+            <span
+              className="flex items-center gap-0.5 rounded-xs border border-amber-500/30 bg-amber-500/15 px-1 py-0.2 text-[9px] font-semibold text-amber-500 shrink-0"
+              title="Created offline — pending sync to ClickUp"
+            >
+              <CloudOff className="h-2 w-2 shrink-0" />
+              <span>Offline</span>
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground flex-wrap">
@@ -353,6 +370,16 @@ const SubtaskRow = React.memo(function SubtaskRow({
       >
         {task.name}
       </span>
+
+      {task.id.startsWith("local-") && (
+        <span
+          className="flex items-center gap-0.5 rounded-xs border border-amber-500/30 bg-amber-500/15 px-1 py-0.2 text-[9px] font-semibold text-amber-500 shrink-0"
+          title="Created offline — pending sync to ClickUp"
+        >
+          <CloudOff className="h-2 w-2 shrink-0" />
+          <span>Offline</span>
+        </span>
+      )}
 
       {dueInfo && (dueInfo.isOverdue || dueInfo.isToday) && (
         <span
@@ -942,8 +969,7 @@ export function TaskList() {
                 ? "border-foreground bg-secondary text-foreground font-semibold shadow-xs"
                 : "border-border/70 bg-secondary/40 text-muted-foreground hover:border-border hover:bg-secondary/70 hover:text-foreground"
             }`}
-            title={`Creating tasks in: ${selectedList?.name || "Select list"}
-Click to switch list`}
+            title={`Creating tasks in: ${selectedList?.name || "Select list"}\nClick to switch list`}
           >
             <Folder className="h-2.5 w-2.5 shrink-0 text-amber-500/90" />
             <span className="truncate font-medium">{selectedList?.name || "Select list"}</span>

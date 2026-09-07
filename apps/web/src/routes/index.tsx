@@ -8,6 +8,7 @@ import { PomodoroFooter } from "../components/PomodoroFooter";
 import { SettingsModal } from "../components/SettingsModal";
 import { isTauri, notify } from "../lib/native";
 import { ClickUpClient, exchangeOAuthCode } from "../lib/clickup";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/")({
   component: HomeComponent,
@@ -37,6 +38,36 @@ function HomeComponent() {
     }, 1000);
     return () => clearInterval(timer);
   }, [tick]);
+
+  // Online / offline network event listeners
+  useEffect(() => {
+    const handleOnline = () => {
+      useAppStore.getState().setIsOnline(true);
+      toast.success("Back online! Syncing offline queue...", { duration: 2500 });
+      useAppStore
+        .getState()
+        .flushOfflineQueue()
+        .then(() => {
+          useAppStore.getState().syncAll();
+        })
+        .catch((err) => {
+          console.warn("Online reconnect sync failed:", err);
+        });
+    };
+
+    const handleOffline = () => {
+      useAppStore.getState().setIsOnline(false);
+      toast.info("You are offline. Work will be saved locally.", { duration: 3000 });
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   // Background update check on app startup
   useEffect(() => {
@@ -77,6 +108,17 @@ function HomeComponent() {
       const intervalMs = isHidden ? 45000 : 15000;
 
       timerId = setInterval(() => {
+        const store = useAppStore.getState();
+        const hasPending =
+          store.offlineTimeQueue.length > 0 ||
+          (store.offlineTaskQueue?.length || 0) > 0 ||
+          (store.offlineStatusQueue?.length || 0) > 0 ||
+          Boolean(store.pendingStopEntry);
+
+        if (hasPending && (typeof navigator === "undefined" || navigator.onLine)) {
+          store.flushOfflineQueue();
+        }
+
         syncCurrentTimer();
         if (!document.hidden) {
           syncTodayTime();
@@ -113,6 +155,17 @@ function HomeComponent() {
     }
 
     debounceTimerRef.current = setTimeout(() => {
+      const store = useAppStore.getState();
+      const hasPending =
+        store.offlineTimeQueue.length > 0 ||
+        (store.offlineTaskQueue?.length || 0) > 0 ||
+        (store.offlineStatusQueue?.length || 0) > 0 ||
+        Boolean(store.pendingStopEntry);
+
+      if (hasPending && (typeof navigator === "undefined" || navigator.onLine)) {
+        store.flushOfflineQueue();
+      }
+
       syncCurrentTimer();
       syncTodayTime();
       if (Date.now() - lastTaskPollRef.current >= 45000) {

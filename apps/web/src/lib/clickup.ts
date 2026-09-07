@@ -349,9 +349,17 @@ export class ClickUpClient {
         },
       );
       return data?.data ?? (data as unknown as ClickUpTimeEntry) ?? null;
-    } catch (err) {
-      console.warn("ClickUp stopTimeEntry error (may not have been running):", err);
-      return null;
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (
+        errMsg.toLowerCase().includes("no timer is running") ||
+        errMsg.toLowerCase().includes("timer not found") ||
+        errMsg.toLowerCase().includes("not currently tracking")
+      ) {
+        return null;
+      }
+      console.warn("ClickUp stopTimeEntry error:", err);
+      throw err;
     }
   }
 
@@ -363,7 +371,7 @@ export class ClickUpClient {
       description?: string;
       taskId?: string;
     },
-  ): Promise<ClickUpTimeEntry | null> {
+  ): Promise<ClickUpTimeEntry> {
     const isRealTask =
       entry.taskId &&
       !entry.taskId.startsWith("demo-") &&
@@ -388,7 +396,7 @@ export class ClickUpClient {
         method: "POST",
         body: JSON.stringify(body),
       });
-      return data?.data ?? (data as unknown as ClickUpTimeEntry) ?? null;
+      return data?.data ?? (data as unknown as ClickUpTimeEntry);
     };
 
     try {
@@ -403,10 +411,11 @@ export class ClickUpClient {
           return await doCreate(false);
         } catch (retryErr) {
           console.warn("ClickUp createTimeEntry retry without description error:", retryErr);
+          throw retryErr;
         }
       }
       console.warn("ClickUp createTimeEntry error:", err);
-      return null;
+      throw err;
     }
   }
 
@@ -417,7 +426,7 @@ export class ClickUpClient {
     teamId: string,
     entryId: string,
     entry: { start?: number; duration?: number; description?: string },
-  ): Promise<ClickUpTimeEntry | null> {
+  ): Promise<ClickUpTimeEntry> {
     const doUpdate = async (includeDescription = true) => {
       const body: Record<string, unknown> = {};
       if (entry.start !== undefined) body.start = entry.start;
@@ -434,7 +443,7 @@ export class ClickUpClient {
           body: JSON.stringify(body),
         },
       );
-      return data?.data ?? (data as unknown as ClickUpTimeEntry) ?? null;
+      return data?.data ?? (data as unknown as ClickUpTimeEntry);
     };
 
     try {
@@ -449,10 +458,11 @@ export class ClickUpClient {
           return await doUpdate(false);
         } catch (retryErr) {
           console.warn("ClickUp updateTimeEntry retry without description error:", retryErr);
+          throw retryErr;
         }
       }
       console.warn("ClickUp updateTimeEntry error:", err);
-      return null;
+      throw err;
     }
   }
 
