@@ -56,11 +56,13 @@ export interface PendingStatusEntry {
 }
 
 export interface PendingStopEntry {
+  id: string;
   entryId: string;
   start: number;
   durationMs: number;
   taskName: string;
   note?: string;
+  createdAt: number;
 }
 
 interface AppState {
@@ -79,16 +81,16 @@ interface AppState {
   activeTimer: ActiveTimer | null;
   elapsedSeconds: number;
   todayLoggedSeconds: number;
+  todayDate?: string;
   dailyGoalHours: number;
   isSyncing: boolean;
   lastSyncError: string | null;
   /** Written every tick so a relaunch can tell tracked time from downtime. */
   timerHeartbeat: number | null;
   recoveredTimer: RecoveredTimer | null;
-  /** A ClickUp entry we failed to stop; retried on every sync so it can never
+  /** ClickUp entries we failed to stop; retried on every sync so they can never
    *  keep running (and inflating) behind our back. */
-  pendingStopEntry: PendingStopEntry | null;
-  pendingStopEntryId: string | null;
+  pendingStopQueue: PendingStopEntry[];
 
   // Offline Sync Queue
   offlineTimeQueue: PendingTimeEntry[];
@@ -226,13 +228,13 @@ export const useAppStore = create<AppState>()(
       activeTimer: null,
       elapsedSeconds: 0,
       todayLoggedSeconds: 0,
+      todayDate: new Date().toISOString().slice(0, 10),
       dailyGoalHours: 8,
       isSyncing: false,
       lastSyncError: null,
       timerHeartbeat: null,
       recoveredTimer: null,
-      pendingStopEntry: null,
-      pendingStopEntryId: null,
+      pendingStopQueue: [],
 
       offlineTimeQueue: [],
       offlineTaskQueue: [],
@@ -303,12 +305,11 @@ export const useAppStore = create<AppState>()(
       },
 
       startTimer: async (taskId, taskName) => {
-        const { token, teamId, activeTimer, todayLoggedSeconds, elapsedSeconds } = get();
+        const { activeTimer } = get();
 
-        // If another timer was running, add its elapsed time to today's log
-        let updatedToday = todayLoggedSeconds;
-        if (activeTimer && activeTimer.isRunning) {
-          updatedToday += elapsedSeconds;
+        // If a timer was active (whether running or paused), finish and save it cleanly first!
+        if (activeTimer) {
+          await get().stopTimer();
         }
 
         const now = Date.now();
@@ -321,19 +322,22 @@ export const useAppStore = create<AppState>()(
             isRunning: true,
           },
           elapsedSeconds: 0,
-          todayLoggedSeconds: updatedToday,
           timerHeartbeat: now,
           recoveredTimer: null,
         });
 
-        setTrayTitle(`00:00`);
+        setTrayTitle("00:00");
 
-        if (token && teamId) {
+        const { token, teamId, isOnline } = get();
+        if (
+          token &&
+          teamId &&
+          isOnline &&
+          !taskId.startsWith("local-") &&
+          !taskId.startsWith("demo-")
+        ) {
           try {
             const client = new ClickUpClient(token);
-            if (activeTimer && activeTimer.isRunning && activeTimer.entryId) {
-              await client.stopTimeEntry(teamId).catch(() => {});
-            }
             const entry = await client.startTimeEntry(teamId, taskId);
             if (entry) {
               set((state) => ({
@@ -351,7 +355,7 @@ export const useAppStore = create<AppState>()(
               get().syncTodayTime();
             }
           } catch (err) {
-            console.warn("ClickUp API sync error on startTimer (will track locally):", err);
+            console.warn("ClickUp API sync error on startTimer (tracking locally):", err);
           }
         }
       },
@@ -360,14 +364,14 @@ export const useAppStore = create<AppState>()(
        *  when an entry already exists there, so the note survives a stop that
        *  happens elsewhere (or a crash) rather than only landing on stop. */
       setTimerNote: async (note) => {
-        const { activeTimer, token, teamId } = get();
+        const { activeTimer, token, teamId, isOnline } = get();
         if (!activeTimer) return;
         if ((activeTimer.note || "") === note) return;
 
         set({ activeTimer: { ...activeTimer, note } });
 
         const entryId = activeTimer.entryId;
-        if (!entryId || !token || !teamId) return;
+        if (!entryId || !token || !teamId || !isOnline) return;
 
         try {
           const client = new ClickUpClient(token);
@@ -375,39 +379,60 @@ export const useAppStore = create<AppState>()(
             description: entryDescription(activeTimer.taskName, note),
           });
         } catch (err) {
-          // The note is kept locally and re-sent when the timer is stopped.
           console.warn("ClickUp API sync error on setTimerNote:", err);
         }
       },
 
       pauseTimer: async () => {
-        const { activeTimer, elapsedSeconds, token, teamId } = get();
+        const { activeTimer, elapsedSeconds, token, teamId, isOnline } = get();
         if (!activeTimer || !activeTimer.isRunning) return;
+
+        const now = Date.now();
+        const segmentDurationSec = Math.max(0, Math.floor((now - activeTimer.startTime) / 1000));
+        const entryId = activeTimer.entryId;
 
         set({
           activeTimer: {
             ...activeTimer,
             isRunning: false,
             accumulatedSeconds: elapsedSeconds,
+            entryId: undefined, // Segment closed on ClickUp; next resume begins new segment
           },
           timerHeartbeat: null,
         });
 
         setTrayTitle("⏸ Paused");
 
-        if (token && teamId && activeTimer.entryId) {
-          try {
-            const client = new ClickUpClient(token);
-            await client.stopTimeEntry(teamId);
-          } catch (err) {
-            console.warn("ClickUp API sync error on pauseTimer:", err);
-            set({ pendingStopEntryId: activeTimer.entryId });
+        if (entryId && token && teamId) {
+          if (isOnline) {
+            try {
+              const client = new ClickUpClient(token);
+              await client.stopTimeEntry(teamId);
+              return;
+            } catch (err) {
+              console.warn("ClickUp API sync error on pauseTimer, queuing stop:", err);
+            }
           }
+          // Queue stop entry so ClickUp does not keep running it
+          set((state) => ({
+            pendingStopQueue: [
+              ...state.pendingStopQueue,
+              {
+                id: `stop-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                entryId,
+                start: activeTimer.startTime,
+                durationMs: segmentDurationSec * 1000,
+                taskName: activeTimer.taskName,
+                note: activeTimer.note,
+                createdAt: Date.now(),
+              },
+            ],
+          }));
         }
       },
 
       resumeTimer: async () => {
-        const { activeTimer, token, teamId } = get();
+        const { activeTimer, token, teamId, isOnline } = get();
         if (!activeTimer || activeTimer.isRunning) return;
 
         const now = Date.now();
@@ -423,7 +448,13 @@ export const useAppStore = create<AppState>()(
         const timeStr = formatTime(activeTimer.accumulatedSeconds || 0);
         setTrayTitle(`${timeStr}`);
 
-        if (token && teamId) {
+        if (
+          token &&
+          teamId &&
+          isOnline &&
+          !activeTimer.taskId.startsWith("local-") &&
+          !activeTimer.taskId.startsWith("demo-")
+        ) {
           try {
             const client = new ClickUpClient(token);
             const entry = await client.startTimeEntry(
@@ -444,11 +475,16 @@ export const useAppStore = create<AppState>()(
       },
 
       stopTimer: async () => {
-        const { activeTimer, elapsedSeconds, todayLoggedSeconds, token, teamId } = get();
+        const { activeTimer, elapsedSeconds, todayLoggedSeconds, token, teamId, isOnline } = get();
         if (!activeTimer) return;
 
-        const durationMs = elapsedSeconds * 1000;
-        const startTime = activeTimer.startTime;
+        const now = Date.now();
+        const totalDurationMs = elapsedSeconds * 1000;
+        const segmentDurationSec = activeTimer.isRunning
+          ? Math.max(0, Math.floor((now - activeTimer.startTime) / 1000))
+          : 0;
+        const segmentDurationMs = segmentDurationSec * 1000;
+
         const taskId = activeTimer.taskId;
         const taskName = activeTimer.taskName;
         const note = activeTimer.note;
@@ -464,15 +500,28 @@ export const useAppStore = create<AppState>()(
 
         setTrayTitle(IDLE_TRAY_TITLE);
 
-        if (durationMs < 1000) return;
+        // Sub-second timers: clean up any live server entry and exit
+        if (totalDurationMs < 1000) {
+          if (hadEntryId && entryId && token && teamId) {
+            try {
+              const client = new ClickUpClient(token);
+              await client.stopTimeEntry(teamId);
+              await client.deleteTimeEntry(teamId, entryId).catch(() => {});
+            } catch {
+              // ignore sub-second discard errors
+            }
+          }
+          return;
+        }
 
-        const enqueueOfflineTime = () => {
+        const enqueueOfflineTime = (start: number, durMs: number) => {
+          if (durMs < 1000) return;
           const pendingEntry: PendingTimeEntry = {
             id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             taskId,
             taskName,
-            start: startTime,
-            durationMs,
+            start,
+            durationMs: durMs,
             createdAt: Date.now(),
             note,
           };
@@ -481,60 +530,76 @@ export const useAppStore = create<AppState>()(
           }));
           notify(
             "Saved Offline",
-            `"${taskName}" (${formatTime(elapsedSeconds)}) will sync when connection returns.`,
+            `"${taskName}" (${formatTime(Math.floor(durMs / 1000))}) will sync when connection returns.`,
           );
         };
 
         if (!token || !teamId) {
-          enqueueOfflineTime();
+          enqueueOfflineTime(now - totalDurationMs, totalDurationMs);
           return;
         }
 
-        try {
-          const client = new ClickUpClient(token);
-          if (hadEntryId && entryId) {
-            await client.stopTimeEntry(teamId);
-            // Re-send the note in case it was typed before the entry existed
-            // or an earlier push failed.
-            if ((note || "").trim()) {
-              await client.updateTimeEntry(teamId, entryId, {
-                description: entryDescription(taskName, note),
-              });
+        // Case A: Live ClickUp entry running on the server
+        if (hadEntryId && entryId) {
+          if (isOnline) {
+            try {
+              const client = new ClickUpClient(token);
+              await client.stopTimeEntry(teamId);
+              if ((note || "").trim()) {
+                await client.updateTimeEntry(teamId, entryId, {
+                  description: entryDescription(taskName, note),
+                });
+              }
+              await get().syncTodayTime();
+              return;
+            } catch (err) {
+              set({ isOnline: false });
+              console.warn("Failed to stop ClickUp entry online, queuing stop entry:", err);
             }
-          } else {
+          }
+
+          set((state) => ({
+            pendingStopQueue: [
+              ...state.pendingStopQueue,
+              {
+                id: `stop-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                entryId,
+                start: activeTimer.startTime,
+                durationMs: segmentDurationMs,
+                taskName,
+                note,
+                createdAt: Date.now(),
+              },
+            ],
+          }));
+          notify(
+            "Timer Stopped Offline",
+            `"${taskName}" will finish syncing when connection returns.`,
+          );
+          return;
+        }
+
+        // Case B: Purely local or offline session
+        const sessionStartTime = now - totalDurationMs;
+
+        if (isOnline && !taskId.startsWith("local-") && !taskId.startsWith("demo-")) {
+          try {
+            const client = new ClickUpClient(token);
             await client.createTimeEntry(teamId, {
-              start: startTime,
-              duration: durationMs,
+              start: sessionStartTime,
+              duration: totalDurationMs,
               description: entryDescription(taskName, note),
               taskId,
             });
-          }
-          await get().syncTodayTime();
-        } catch (err) {
-          set({ isOnline: false });
-          // ClickUp already holds this entry and it is still running there.
-          if (hadEntryId && entryId) {
-            set({
-              pendingStopEntry: {
-                entryId,
-                start: startTime,
-                durationMs,
-                taskName,
-                note,
-              },
-              pendingStopEntryId: entryId,
-            });
-            console.warn("Failed to stop the ClickUp entry; will retry on next sync:", err);
-            notify(
-              "Timer Stopped Offline",
-              `"${taskName}" will finish syncing when connection returns.`,
-            );
+            await get().syncTodayTime();
             return;
+          } catch (err) {
+            set({ isOnline: false });
+            console.warn("Failed to create time entry online, saving to offline queue:", err);
           }
-
-          console.warn("Failed to log timer online. Enqueuing for offline sync:", err);
-          enqueueOfflineTime();
         }
+
+        enqueueOfflineTime(sessionStartTime, totalDurationMs);
       },
 
       flushOfflineQueue: async () => {
@@ -544,14 +609,14 @@ export const useAppStore = create<AppState>()(
           offlineTimeQueue,
           offlineTaskQueue,
           offlineStatusQueue,
-          pendingStopEntry,
+          pendingStopQueue,
         } = get();
 
         const totalPending =
           (offlineTimeQueue?.length || 0) +
           (offlineTaskQueue?.length || 0) +
           (offlineStatusQueue?.length || 0) +
-          (pendingStopEntry ? 1 : 0);
+          (pendingStopQueue?.length || 0);
 
         if (!token || !teamId || totalPending === 0) return;
 
@@ -560,27 +625,44 @@ export const useAppStore = create<AppState>()(
         flushOfflinePromise = (async () => {
           const client = new ClickUpClient(token);
 
-          // 1. Settle pending stop entry if one was interrupted while offline
-          const currentStopEntry = get().pendingStopEntry;
-          if (currentStopEntry) {
+          // 1. Settle pending stop queue
+          const currentStopQueue = get().pendingStopQueue || [];
+          const remainingStops: PendingStopEntry[] = [];
+          let syncedStopsCount = 0;
+
+          for (const stopItem of currentStopQueue) {
             try {
-              await client.stopTimeEntry(teamId);
-              if (
-                currentStopEntry.start &&
-                currentStopEntry.durationMs &&
-                currentStopEntry.durationMs >= 1000
-              ) {
-                await client.updateTimeEntry(teamId, currentStopEntry.entryId, {
-                  start: currentStopEntry.start,
-                  duration: currentStopEntry.durationMs,
-                  description: entryDescription(currentStopEntry.taskName, currentStopEntry.note),
+              const running = await client.getCurrentTimeEntry(teamId).catch(() => null);
+              if (running && running.id === stopItem.entryId) {
+                await client.stopTimeEntry(teamId);
+              }
+              if (stopItem.durationMs === 0) {
+                // Abandoned / discarded timer: delete from ClickUp
+                await client.deleteTimeEntry(teamId, stopItem.entryId).catch(() => {});
+              } else if (stopItem.start && stopItem.durationMs && stopItem.durationMs >= 1000) {
+                await client.updateTimeEntry(teamId, stopItem.entryId, {
+                  start: stopItem.start,
+                  duration: stopItem.durationMs,
+                  description: entryDescription(stopItem.taskName, stopItem.note),
                 });
               }
-              set({ pendingStopEntry: null, pendingStopEntryId: null });
-            } catch (err) {
-              console.warn("Failed to settle pending stop entry, retaining for next attempt:", err);
+              syncedStopsCount++;
+            } catch (err: unknown) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              if (
+                errMsg.includes("not found") ||
+                errMsg.includes("TIMEENTRY_001") ||
+                errMsg.includes("404")
+              ) {
+                console.warn(`Stop entry ${stopItem.entryId} no longer exists on ClickUp:`, err);
+                syncedStopsCount++; // drop dead entry
+              } else {
+                console.warn("Failed to settle pending stop entry, retaining:", err);
+                remainingStops.push(stopItem);
+              }
             }
           }
+          set({ pendingStopQueue: remainingStops });
 
           // 2. Flush offline tasks first so remapped task IDs can update time & status queues
           const currentTasksQueue = get().offlineTaskQueue || [];
@@ -658,6 +740,16 @@ export const useAppStore = create<AppState>()(
           let syncedTimeCount = 0;
 
           for (const item of currentTimeQueue) {
+            // If task was created offline and has not synced yet, retain until task is created
+            if (
+              item.taskId &&
+              item.taskId.startsWith("local-") &&
+              !localToRemoteTaskMap.has(item.taskId)
+            ) {
+              remainingTime.push(item);
+              continue;
+            }
+
             try {
               await client.createTimeEntry(teamId, {
                 start: item.start,
@@ -666,7 +758,27 @@ export const useAppStore = create<AppState>()(
                 taskId: item.taskId,
               });
               syncedTimeCount++;
-            } catch (err) {
+            } catch (err: unknown) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              if (
+                item.taskId &&
+                (errMsg.includes("TASK_010") ||
+                  errMsg.includes("TASK_001") ||
+                  errMsg.includes("not found"))
+              ) {
+                // Task invalid/deleted in ClickUp: log without task so work time is not lost!
+                try {
+                  await client.createTimeEntry(teamId, {
+                    start: item.start,
+                    duration: item.durationMs,
+                    description: entryDescription(item.taskName, item.note),
+                  });
+                  syncedTimeCount++;
+                  continue;
+                } catch {
+                  // retain if still failing
+                }
+              }
               console.warn("Failed to flush offline time entry, retaining in queue:", err);
               remainingTime.push(item);
             }
@@ -687,15 +799,25 @@ export const useAppStore = create<AppState>()(
             try {
               await client.updateTaskStatus(statusItem.taskId, statusItem.status);
               syncedStatusCount++;
-            } catch (err) {
-              console.warn("Failed to flush offline status update:", err);
-              remainingStatus.push(statusItem);
+            } catch (err: unknown) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              if (
+                errMsg.includes("not found") ||
+                errMsg.includes("TASK_010") ||
+                errMsg.includes("TASK_001")
+              ) {
+                syncedStatusCount++;
+              } else {
+                console.warn("Failed to flush offline status update:", err);
+                remainingStatus.push(statusItem);
+              }
             }
           }
 
           set({ offlineStatusQueue: remainingStatus });
 
-          const totalSynced = syncedTimeCount + syncedTasksCount + syncedStatusCount;
+          const totalSynced =
+            syncedTimeCount + syncedTasksCount + syncedStatusCount + syncedStopsCount;
           if (totalSynced > 0) {
             set({ isOnline: true });
             const parts: string[] = [];
@@ -707,6 +829,9 @@ export const useAppStore = create<AppState>()(
             }
             if (syncedStatusCount > 0) {
               parts.push(`${syncedStatusCount} status update${syncedStatusCount > 1 ? "s" : ""}`);
+            }
+            if (syncedStopsCount > 0) {
+              parts.push(`${syncedStopsCount} timer stop${syncedStopsCount > 1 ? "s" : ""}`);
             }
 
             notify("Offline Work Synced", `Uploaded ${parts.join(", ")} to ClickUp.`);
@@ -756,7 +881,7 @@ export const useAppStore = create<AppState>()(
       },
 
       logRecoveredTimer: async () => {
-        const { recoveredTimer, token, teamId } = get();
+        const { recoveredTimer, token, teamId, isOnline } = get();
         if (!recoveredTimer) return;
 
         const { taskId, taskName, entryId, startTime, trackedSeconds, note } = recoveredTimer;
@@ -786,7 +911,7 @@ export const useAppStore = create<AppState>()(
           );
         };
 
-        if (!token || !teamId) {
+        if (!token || !teamId || !isOnline) {
           enqueueOffline();
           return;
         }
@@ -798,22 +923,16 @@ export const useAppStore = create<AppState>()(
             try {
               serverEntry = await client.getCurrentTimeEntry(teamId);
             } catch (err) {
-              // Without knowing whether ClickUp still holds this entry we cannot
-              // choose between correcting it and creating a new one — creating
-              // one blindly would double-log. Hand it back for a later retry.
-              console.warn("Could not check ClickUp before logging recovered time:", err);
-              set({ recoveredTimer });
-              notify(
-                "Couldn't Reach ClickUp",
-                `"${taskName}" is still waiting to be logged. Try again when you're online.`,
+              console.warn(
+                "Could not check ClickUp before logging recovered time, queueing offline:",
+                err,
               );
+              enqueueOffline();
               return;
             }
           }
 
           if (entryId && serverEntry && serverEntry.id === entryId) {
-            // Still open on ClickUp, so it has been accruing the whole downtime.
-            // Stop it, then rewrite it to the time actually tracked.
             await client.stopTimeEntry(teamId);
             await client.updateTimeEntry(teamId, entryId, {
               start: startTime,
@@ -831,36 +950,53 @@ export const useAppStore = create<AppState>()(
           await get().syncTodayTime();
           notify("Time Logged", `"${taskName}" (${formatTime(trackedSeconds)}) saved to ClickUp.`);
         } catch (err) {
-          console.warn("Failed to log recovered time online:", err);
-          set({ isOnline: false });
+          console.warn("Failed to log recovered time online, saving offline:", err);
           enqueueOffline();
         }
       },
 
       discardRecoveredTimer: async () => {
-        const { recoveredTimer, token, teamId } = get();
+        const { recoveredTimer, token, teamId, isOnline } = get();
         if (!recoveredTimer) return;
 
-        const { entryId } = recoveredTimer;
+        const { entryId, startTime, taskName } = recoveredTimer;
         set({ recoveredTimer: null });
         if (!token || !teamId || !entryId) return;
 
-        try {
-          const client = new ClickUpClient(token);
-          const serverEntry = await client.getCurrentTimeEntry(teamId);
-          if (serverEntry && serverEntry.id === entryId) {
-            await client.stopTimeEntry(teamId).catch(() => {});
-            await client.deleteTimeEntry(teamId, entryId).catch(() => {});
-            await get().syncTodayTime();
+        if (isOnline) {
+          try {
+            const client = new ClickUpClient(token);
+            const serverEntry = await client.getCurrentTimeEntry(teamId);
+            if (serverEntry && serverEntry.id === entryId) {
+              await client.stopTimeEntry(teamId).catch(() => {});
+              await client.deleteTimeEntry(teamId, entryId).catch(() => {});
+              await get().syncTodayTime();
+              return;
+            }
+          } catch (err) {
+            console.warn("Failed to discard the abandoned ClickUp entry online:", err);
           }
-        } catch (err) {
-          console.warn("Failed to discard the abandoned ClickUp entry:", err);
         }
+
+        // If offline or network failed, queue a stop with duration 0 so ClickUp deletes it on reconnect
+        set((state) => ({
+          pendingStopQueue: [
+            ...state.pendingStopQueue,
+            {
+              id: `discard-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              entryId,
+              start: startTime,
+              durationMs: 0,
+              taskName,
+              createdAt: Date.now(),
+            },
+          ],
+        }));
       },
 
       syncCurrentTimer: async () => {
-        const { token, teamId, tasks } = get();
-        if (!token || !teamId) return;
+        const { token, teamId, tasks, isOnline } = get();
+        if (!token || !teamId || !isOnline) return;
 
         if (syncTimerPromise) {
           return syncTimerPromise;
@@ -872,39 +1008,16 @@ export const useAppStore = create<AppState>()(
             const entry = await client.getCurrentTimeEntry(teamId);
             const serverIsRunning = entry !== null && (!entry.stop || Number(entry.stop) === 0);
 
-            // Retry any stop that failed earlier (e.g. paused/stopped while offline).
-            // Only stop it if it is still the running one, so a timer started
-            // since then is never cut short.
-            const stuckEntryId = get().pendingStopEntryId;
-            const stuckEntry = get().pendingStopEntry;
-            const targetId = stuckEntry?.entryId || stuckEntryId;
-            if (targetId) {
-              if (entry && serverIsRunning && entry.id === targetId) {
-                try {
-                  await client.stopTimeEntry(teamId);
-                  if (stuckEntry?.start && stuckEntry.durationMs && stuckEntry.durationMs >= 1000) {
-                    await client.updateTimeEntry(teamId, targetId, {
-                      start: stuckEntry.start,
-                      duration: stuckEntry.durationMs,
-                      description: entryDescription(stuckEntry.taskName, stuckEntry.note),
-                    });
-                  }
-                  set({ pendingStopEntryId: null, pendingStopEntry: null });
-                  await get().syncTodayTime();
-                } catch (err) {
-                  console.warn("Retrying a pending timer stop failed:", err);
-                }
-                return;
-              }
-              // It is no longer running, so nothing is owed.
-              set({ pendingStopEntryId: null, pendingStopEntry: null });
+            // Settle pending stop queue if items are waiting
+            const stops = get().pendingStopQueue || [];
+            if (stops.length > 0) {
+              await get().flushOfflineQueue();
             }
 
             const current = get().activeTimer;
 
             if (entry && serverIsRunning) {
               // A locally paused timer must never be revived by the server copy
-              // we failed to stop; that turns a pause into billed time.
               if (
                 current &&
                 !current.isRunning &&
@@ -914,7 +1027,6 @@ export const useAppStore = create<AppState>()(
                   await client.stopTimeEntry(teamId);
                   await get().syncTodayTime();
                 } catch (err) {
-                  set({ pendingStopEntryId: entry.id });
                   console.warn("Could not stop the ClickUp entry behind a paused timer:", err);
                 }
                 return;
@@ -934,15 +1046,11 @@ export const useAppStore = create<AppState>()(
                 entry.description ||
                 "Active Task";
 
-              // Segments finished before this one (e.g. before a pause) exist only
-              // in local accumulatedSeconds — the server entry starts at the resume.
               const continuesLocal =
                 current !== null &&
                 current.isRunning &&
                 (current.entryId === entry.id || current.taskId === taskId);
               const accumulated = continuesLocal ? current.accumulatedSeconds || 0 : 0;
-              // A description that is not just the task name is a note, whether
-              // it was written here or in ClickUp.
               const serverNote =
                 entry.description && entry.description !== taskName ? entry.description : undefined;
               const note = continuesLocal ? current.note || serverNote : serverNote;
@@ -964,9 +1072,13 @@ export const useAppStore = create<AppState>()(
 
               setTrayTitle(`${formatTime(elapsed)}`);
             } else if (current && current.isRunning) {
-              // If the timer has no entryId yet (tracking locally or sync in flight)
-              // or was started less than 15s ago, do not wipe it out!
-              if (!current.entryId || Date.now() - current.startTime < 15000) {
+              // If tracking locally (no entryId, local task, or started < 15s ago), DO NOT wipe!
+              if (
+                !current.entryId ||
+                current.taskId.startsWith("local-") ||
+                current.taskId.startsWith("demo-") ||
+                Date.now() - current.startTime < 15000
+              ) {
                 return;
               }
 
@@ -1035,7 +1147,39 @@ export const useAppStore = create<AppState>()(
                   totalSeconds += Math.floor(overlapMs / 1000);
                 }
               }
-              set({ todayLoggedSeconds: totalSeconds, isOnline: true });
+              // Also include un-flushed offline time entries from today so the counter does not jump backwards
+              const offlineQueue = get().offlineTimeQueue || [];
+              for (const off of offlineQueue) {
+                const offStart = off.start;
+                const offDur = off.durationMs;
+                if (offStart && offDur > 0) {
+                  const overlapMs =
+                    Math.min(offStart + offDur, dayEnd) - Math.max(offStart, dayStart);
+                  if (overlapMs > 0) {
+                    totalSeconds += Math.floor(overlapMs / 1000);
+                  }
+                }
+              }
+
+              // Also include un-flushed pending stop entries from today
+              const stopQueue = get().pendingStopQueue || [];
+              for (const stop of stopQueue) {
+                const stopStart = stop.start;
+                const stopDur = stop.durationMs;
+                if (stopStart && stopDur > 0) {
+                  const overlapMs =
+                    Math.min(stopStart + stopDur, dayEnd) - Math.max(stopStart, dayStart);
+                  if (overlapMs > 0) {
+                    totalSeconds += Math.floor(overlapMs / 1000);
+                  }
+                }
+              }
+
+              set({
+                todayLoggedSeconds: totalSeconds,
+                todayDate: new Date().toISOString().slice(0, 10),
+                isOnline: true,
+              });
             }
           } catch (err) {
             console.warn("Failed to sync today's time from ClickUp:", err);
@@ -1576,9 +1720,9 @@ export const useAppStore = create<AppState>()(
         activeTimer: state.activeTimer,
         timerHeartbeat: state.timerHeartbeat,
         recoveredTimer: state.recoveredTimer,
-        pendingStopEntry: state.pendingStopEntry || null,
-        pendingStopEntryId: state.pendingStopEntryId,
+        pendingStopQueue: state.pendingStopQueue || [],
         todayLoggedSeconds: state.todayLoggedSeconds,
+        todayDate: state.todayDate || new Date().toISOString().slice(0, 10),
         offlineTimeQueue: state.offlineTimeQueue || [],
         offlineTaskQueue: state.offlineTaskQueue || [],
         offlineStatusQueue: state.offlineStatusQueue || [],
@@ -1594,6 +1738,15 @@ export const useAppStore = create<AppState>()(
             setNativePinned(state.isPinned);
           }
 
+          // Check for midnight rollover across app relaunch
+          const todayStr = new Date().toISOString().slice(0, 10);
+          if (state.todayDate && state.todayDate !== todayStr) {
+            state.todayLoggedSeconds = 0;
+            state.todayDate = todayStr;
+          } else if (!state.todayDate) {
+            state.todayDate = todayStr;
+          }
+
           // Ensure offline queues are initialized as arrays
           if (!Array.isArray(state.offlineTimeQueue)) {
             state.offlineTimeQueue = [];
@@ -1603,6 +1756,24 @@ export const useAppStore = create<AppState>()(
           }
           if (!Array.isArray(state.offlineStatusQueue)) {
             state.offlineStatusQueue = [];
+          }
+          if (!Array.isArray(state.pendingStopQueue)) {
+            state.pendingStopQueue = [];
+          }
+          // Legacy migration
+          if ((state as any).pendingStopEntry) {
+            const legacy = (state as any).pendingStopEntry;
+            state.pendingStopQueue.push({
+              id: `migrated-${Date.now()}`,
+              entryId: legacy.entryId,
+              start: legacy.start,
+              durationMs: legacy.durationMs,
+              taskName: legacy.taskName,
+              note: legacy.note,
+              createdAt: Date.now(),
+            });
+            delete (state as any).pendingStopEntry;
+            delete (state as any).pendingStopEntryId;
           }
 
           if (typeof state.confirmTaskCompletion !== "boolean") {

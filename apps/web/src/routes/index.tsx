@@ -113,7 +113,7 @@ function HomeComponent() {
           store.offlineTimeQueue.length > 0 ||
           (store.offlineTaskQueue?.length || 0) > 0 ||
           (store.offlineStatusQueue?.length || 0) > 0 ||
-          Boolean(store.pendingStopEntry);
+          (store.pendingStopQueue?.length || 0) > 0;
 
         if (hasPending && (typeof navigator === "undefined" || navigator.onLine)) {
           store.flushOfflineQueue();
@@ -160,7 +160,7 @@ function HomeComponent() {
         store.offlineTimeQueue.length > 0 ||
         (store.offlineTaskQueue?.length || 0) > 0 ||
         (store.offlineStatusQueue?.length || 0) > 0 ||
-        Boolean(store.pendingStopEntry);
+        (store.pendingStopQueue?.length || 0) > 0;
 
       if (hasPending && (typeof navigator === "undefined" || navigator.onLine)) {
         store.flushOfflineQueue();

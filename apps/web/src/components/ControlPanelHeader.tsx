@@ -29,14 +29,14 @@ export function ControlPanelHeader({
   const offlineTimeQueue = useAppStore((s) => s.offlineTimeQueue);
   const offlineTaskQueue = useAppStore((s) => s.offlineTaskQueue);
   const offlineStatusQueue = useAppStore((s) => s.offlineStatusQueue);
-  const pendingStopEntry = useAppStore((s) => s.pendingStopEntry);
+  const pendingStopQueue = useAppStore((s) => s.pendingStopQueue);
   const { theme, setTheme } = useTheme();
 
   const pendingCount =
     (offlineTimeQueue?.length || 0) +
     (offlineTaskQueue?.length || 0) +
     (offlineStatusQueue?.length || 0) +
-    (pendingStopEntry ? 1 : 0);
+    (pendingStopQueue?.length || 0);
 
   const handleSync =
     onSync ||

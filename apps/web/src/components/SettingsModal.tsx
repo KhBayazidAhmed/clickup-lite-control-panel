@@ -71,7 +71,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     offlineTimeQueue,
     offlineTaskQueue,
     offlineStatusQueue,
-    pendingStopEntry,
+    pendingStopQueue,
     flushOfflineQueue,
     customClientId,
     customClientSecret,
@@ -82,7 +82,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     (offlineTimeQueue?.length || 0) +
     (offlineTaskQueue?.length || 0) +
     (offlineStatusQueue?.length || 0) +
-    (pendingStopEntry ? 1 : 0);
+    (pendingStopQueue?.length || 0);
 
   const [authMethod, setAuthMethod] = useState<"oauth" | "token">("oauth");
   const [personalTokenInput, setPersonalTokenInput] = useState(token || "");
@@ -105,7 +105,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   // Auto-updater state
   const setAvailableUpdateVersion = useAppStore((s) => s.setAvailableUpdateVersion);
-  const [appVersion, setAppVersion] = useState("0.1.2");
+  const [appVersion, setAppVersion] = useState("0.1.3");
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -703,8 +703,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   {offlineTaskQueue.length > 0 && ` ${offlineTaskQueue.length} task(s)`}
                   {offlineStatusQueue.length > 0 &&
                     ` ${offlineStatusQueue.length} status change(s)`}
-                  {pendingStopEntry && " 1 timer stop"}. Automatically uploaded when connection
-                  returns.
+                  {pendingStopQueue &&
+                    pendingStopQueue.length > 0 &&
+                    " " + pendingStopQueue.length + " timer stop(s)"}
+                  . Automatically uploaded when connection returns.
                 </>
               ) : (
                 "All tasks and time tracking entries are fully synced with ClickUp servers."
